@@ -75,8 +75,12 @@ TRAINING_PILE_REGION = (0.02, 0.24, 0.96, 0.72)
 STOP_REQUESTED = threading.Event()
 START_REQUESTED = threading.Event()
 RECORDING_STOP_REQUESTED = threading.Event()
+CONNECTION_CHECK_STOP_REQUESTED = threading.Event()
+CONNECTION_CHECK_ACTIVE = threading.Event()
 CALIBRATION_LOCK = threading.RLock()
 STATUS_SINK: Any = None
+APP_BUNDLE_IDENTIFIER = "com.botplayer.iphone-mirroring"
+CANONICAL_APP_NAME = "Bot Player.app"
 DEFAULT_BLOCK_JAM_ICON_REGION = [0.0, 0.0, 0.18, 0.09]
 DEFAULT_BLOCK_JAM_ICON_JPEG = (
     "/9j/4AAQSkZJRgABAQAAAQABAAD/4QBARXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAAqACAAQAAAABAAAAn6ADAAQAAAABAAAAnAAAAAD/4gIoSUNDX1BST0ZJTEUAAQEAAAIYYXBwbAQAAABtbnRyUkdCIFhZWiAH5gABAAEAAAAAAABhY3NwQVBQTAAAAABBUFBMAAAAAAAAAAAAAAAAAAAAAAAA9tYAAQAAAADTLWFwcGwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAApkZXNjAAAA/AAAADBjcHJ0AAABLAAAAFB3dHB0AAABfAAAABRyWFlaAAABkAAAABRnWFlaAAABpAAAABRiWFlaAAABuAAAABRyVFJDAAABzAAAACBjaGFkAAAB7AAAACxiVFJDAAABzAAAACBnVFJDAAABzAAAACBtbHVjAAAAAAAAAAEAAAAMZW5VUwAAABQAAAAcAEQAaQBzAHAAbABhAHkAIABQADNtbHVjAAAAAAAAAAEAAAAMZW5VUwAAADQAAAAcAEMAbwBwAHkAcgBpAGgAdAAgAEEAcABwAGwAZQAgAEkAbgBjAC4ALAAgADIAMAAyADIWFlogAAAAAAAAg98AAD2////7tYWVogAAAAAAAASr8AALE3AAAKuVhZWiAAAAAAAAAoOAAAEQsAAMi5cGFyYQAAAAAAAwAAAAJmZgAA8qcAAA1ZAAAT0AAACltzZjMyAAAAAAABDEIAAAXe///zJgAAB5MAAP2Q///7ov///aMAAAPcAADAbv/bAEMABAMDAwMCBAMDAwQEBAUGCgYGBQUGDAgJBwoODA8ODgwNDQ8RFhMPEBURDQ0TGhMVFxgZGRkPEhsdGxgdFhgZGP/bAEMBBAQEBgUGCwYGCxgQDRAYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGP/AABEIAD8AQAMBIgACEQEDEQH/xAAbAAACAgMBAAAAAAAAAAAAAAAFBgQHAAIDAf/EADsQAAIBAwIDBAYHBwUAAAAAAAECAwQFEQAhBhIxBxNBYRQiQnGRsRUjMlFzgdEXJENiobLBMzRSU3L/xAAaAQACAwEBAAAAAAAAAAAAAAAGBwIDBQEA/8QAKhEAAQMCBgEDBQEBAAAAAAAAAQIEEQADBQYSITFBcVFhoRMUM5HBkrH/2gAMAwEAAhEDEQA/AGphk514g316TrF3OB8NANEWmt8ba5smdT0oKjGXCx+Uhwfh11hoHH8WM+4H9NRKvSpBNCjDrzuPLRdLfI5wGX+upMdgqpR6rxfmT+mqyqKmBQFI8HUyFdGk4TrzuJIPzJ/TXdOFrgnWSD4n9NeCprkUqE6N2ykEMCTn/XlHMp/618MeZ658B79AA3N6o8dtODAJWSrj1UbkA8l2/wAatA1KCRXDtuaE3jiOxcOIn0pVBJJN0hRS8j+eB4eZ0HftEsqyKptl0HN0LQhc/FtBae2W6upqriPiSpMnp9QGEKZ52iXPIqZ2XBGCfBffpiht7Xe2pSVttjhSQK1JOWMk4k2B53PUlRgDboNtN61lLBWSEW36ipZgE6tIk9CI78mlw6zS/XqvNwE2wfb+1lHx3RVFS0MFkuHMkZlYyciBVHiSTsNx78jWy9qttpndKiw3SPu88+OQlcdds658WVz8P08NLb4wlZX1DSrtkcuQOYjxxy4BPQsxGMDXGRo4ES3VpgljlCgUVRMWYMdj3bk5YeWcHoRqy7lfAU3NBsn/AGrb5rTa3sw38OTiaQPpqmNh1yeNhOwPG3VWBwzxVZuKLe1VZ6rveQgSROvLJGfuZf8APTRzmONUfaoH4W7Y6MW9USimqPRW7sEK6OASN9zgkHB6bavL1VBYjIUEke4Z0v8ANWXkYO8TbsqJQsSmeRvEHx/a18FxsP2inFwQU8x4map2m3qYh/Ovz04yf7up/Ef5nSjSr+9xfiL89N021TV+Tv8AM6wG350+R/2tu/8AjV4NJtfahX9lcPoM2J7afSDFGxUsjE84Pj1BO2xA8tTbLcGuPCscUbIvc4eM5wqsPa8zrnbeK6CyPS0txpFkWZeRAcAOFJ9Uk7A+ucH451vauz+81t+kksdwpFtDtzKtRIVkgBPRkxvjPUbHTCz1hynr7S0XquJ3KZ4ngge/fzSNS1cJapv3UkWyTpV0T2PNcuI4Ky+8d2+tAQpJTBiw+ynKSG38iNSfoSitF4ivFxtb1UEMgbcnm3+zJjPKR9wxsRjOdOvodHbe54dghNSsGXqKkgKxYnPKPuHQ492tr5cqaptFPa6OLvnlykahsNGfHfwHifDQc+zi4sYuiwUa9MBQHOvYEj1IIiDsd6e+F3nLjLdhtq+knQRIMAp33URwCN/bmk+40VPNxFY623zx1FE06S8yJylJGb1ub+Ylfyxjw1Yssn1Eu/8ADb+06Q3jp6G72qzU31iQzrI82/rvvkjy8fPTg8mYZN/Yb5HRdn1S1XWiliDp7557ilxlkJDB6LZlI1QfUQaram2q4vxF+emudSa2rQdTI4/qdK8AxVRf+1+em6pTFxqPxW/uOl0lZTcChzTFUkKBBqje0d5Ke0UWZGikhqG+z1GwB124O7TLlw+yQXcctPz8kUxbCuD/AMT7J8jtqwOLuB6LiqGLvKh6WaJiyuqhlY49oeOkz9i9TUVUM9XxFDM0beNOQMZzgDOBogzDi6MTefe25QqBxsQQADBHv8dVVl5jZZYeWDmFJlWxEggkkSPHzT7deKbDJPFeai6tSTGMGXDKveD2SwJOCBtkddKlZx1b5CUs1HPUtO2FkcthiDvjONs46DGiEfZYgu7VaXOJYni7mSIU/wBpfj1zqbbOy2KmvArqm9PMFwFjWEKFUdAN/doWTaLp4HDu4QpREq4jomEjfb91uJU0ZMzYapkJB0pMn3AlXU8TsKkcPRVNRxBSCV+9aLMkrAYAwPlk40/MpaN1HUgjUW22yjtkDR0qEFt2djlm950QjG+i7NGOWcTdI+1BFu2kJTPJjv1/e/ZoIwTBVtWlxDojXdJKo4E7QOv1t0K//9k="
@@ -166,17 +170,53 @@ def present_disclaimer() -> bool:
     return bool(accepted)
 
 
-def open_mac_permissions() -> None:
-    """Open Apple's permission panes; macOS still requires the user to approve."""
-    urls = (
-        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
-        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+def canonical_app_path() -> Path:
+    """Return the one user-writable app location used by the beta launcher."""
+    return Path.home() / "Applications" / CANONICAL_APP_NAME
+
+
+def running_app_path() -> Path | None:
+    if not getattr(sys, "frozen", False):
+        return None
+    executable = Path(sys.executable).resolve()
+    for parent in (executable, *executable.parents):
+        if parent.name.endswith(".app"):
+            return parent
+    return None
+
+
+def permission_subject() -> str:
+    app_path = running_app_path()
+    if app_path is not None:
+        return f"{CANONICAL_APP_NAME} at {app_path}"
+    return (
+        f"the packaged {CANONICAL_APP_NAME} at {canonical_app_path()} "
+        "(this source launch is not the permission-granting identity)"
     )
-    for url in urls:
-        try:
-            subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except OSError:
-            pass
+
+
+def permission_identity_text() -> str:
+    app_path = running_app_path() or canonical_app_path()
+    runtime = "Packaged Bot Player.app" if getattr(sys, "frozen", False) else "Source launch"
+    return (
+        f"Permission subject: {permission_subject()}\n"
+        f"Bundle identifier: {APP_BUNDLE_IDENTIFIER}\n"
+        f"Runtime: {runtime}\n"
+        f"Expected app location: {app_path}"
+    )
+
+
+def open_mac_permissions(permission: str = "screen") -> None:
+    """Open one Apple permission pane; macOS still requires the user to approve."""
+    urls = {
+        "screen": "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+        "accessibility": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+    }
+    url = urls.get(permission, urls["screen"])
+    try:
+        subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
 
 
 def launch_iphone_mirroring() -> None:
@@ -187,31 +227,170 @@ def launch_iphone_mirroring() -> None:
         emit("waiting", "Open Apple iPhone Mirroring to let Bot Player connect.")
 
 
-def offer_mac_permissions() -> None:
-    import tkinter as tk
-    from tkinter import messagebox
+def accessibility_permission() -> bool | None:
+    checker = getattr(Quartz, "AXIsProcessTrusted", None)
+    if not callable(checker):
+        return None
+    try:
+        return bool(checker())
+    except Exception:
+        return None
 
-    root = tk.Tk()
-    root.withdraw()
-    permission_subject = (
-        "Bot Player"
-        if getattr(sys, "frozen", False)
-        else "the Python runtime and Terminal used by this launcher"
+
+def request_screen_capture_permission() -> bool | None:
+    requester = getattr(Quartz, "CGRequestScreenCaptureAccess", None)
+    if callable(requester):
+        try:
+            return bool(requester())
+        except Exception:
+            pass
+    return screen_capture_permission()
+
+
+def request_accessibility_permission() -> bool | None:
+    requester = getattr(Quartz, "AXIsProcessTrustedWithOptions", None)
+    if callable(requester):
+        prompt_key = getattr(Quartz, "kAXTrustedCheckOptionPrompt", "AXTrustedCheckOptionPrompt")
+        try:
+            return bool(requester({prompt_key: True}))
+        except Exception:
+            pass
+    return accessibility_permission()
+
+
+def permission_status_text(value: bool | None) -> str:
+    if value is True:
+        return "Ready"
+    if value is False:
+        return "Needs approval"
+    return "Status unavailable; use the setup buttons"
+
+
+def packaged_app_identity_ready() -> bool:
+    """Return whether this process is the canonical installed app."""
+    if not getattr(sys, "frozen", False):
+        return False
+    app_path = running_app_path()
+    if app_path is None:
+        return False
+    try:
+        return app_path.resolve() == canonical_app_path().resolve()
+    except OSError:
+        return app_path == canonical_app_path()
+
+
+def permission_identity_status_text() -> str:
+    """Describe whether permission checks apply to the canonical app path."""
+    if not getattr(sys, "frozen", False):
+        return "App identity: Not validated — this is a source launch"
+    app_path = running_app_path()
+    if app_path is None:
+        return "App identity: Not validated — packaged app path is unavailable"
+    if packaged_app_identity_ready():
+        return f"App identity: Verified — {app_path}"
+    return (
+        f"App identity: Not validated — running from {app_path}; "
+        f"relaunch {canonical_app_path()}"
     )
-    wants_help = messagebox.askyesno(
-        "Bot Player — Mac permissions",
-        f"Bot Player needs Screen Recording to read the mirrored iPhone and Accessibility to send clicks to it.\n\n"
-        f"This launch is running through {permission_subject}. In the permission lists, enable "
-        "the matching Python and/or Terminal entry when using the double-click source launcher, "
-        "or Bot Player when using the packaged app.\n\n"
-        "Open both Mac permission pages now? Turn on the matching entry, then return here. "
-        "macOS requires you to approve these permissions yourself.",
-        default=messagebox.YES,
-        icon=messagebox.INFO,
-    )
-    root.destroy()
-    if wants_help:
-        open_mac_permissions()
+
+
+def show_permission_setup(parent: Any = None) -> None:
+    """Show a guided checklist for the exact packaged app requesting access."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    owns_root = parent is None
+    root = parent
+    if root is None:
+        root = tk.Tk()
+        root.withdraw()
+    dialog = tk.Toplevel(root)
+    dialog.title("Bot Player — Mac setup")
+    dialog.geometry("700x440")
+    dialog.minsize(600, 400)
+    dialog.transient(root)
+
+    ttk.Label(
+        dialog,
+        text="Approve the packaged Bot Player.app",
+        font=("TkDefaultFont", 14, "bold"),
+    ).pack(anchor=tk.W, padx=22, pady=(20, 4))
+    ttk.Label(
+        dialog,
+        text=permission_identity_text(),
+        justify=tk.LEFT,
+        wraplength=590,
+    ).pack(anchor=tk.W, padx=22)
+    ttk.Label(
+        dialog,
+        text=(
+            "These permissions are separate. Approve the app shown above, not a Python "
+            "interpreter. If you deliberately install a newer beta, macOS may ask again "
+            "because its ad-hoc app contents changed."
+        ),
+        justify=tk.LEFT,
+        wraplength=590,
+    ).pack(anchor=tk.W, padx=22, pady=(10, 14))
+
+    status_frame = ttk.Frame(dialog)
+    status_frame.pack(fill=tk.X, padx=22)
+    screen_status = tk.StringVar()
+    accessibility_status = tk.StringVar()
+    mirroring_status = tk.StringVar()
+    identity_status = tk.StringVar()
+    validation_status = tk.StringVar()
+
+    def refresh() -> bool:
+        screen_permission = screen_capture_permission()
+        accessibility = accessibility_permission()
+        identity_ready = packaged_app_identity_ready()
+        identity_status.set(permission_identity_status_text())
+        screen_status.set(f"1. Screen Recording: {permission_status_text(screen_permission)}")
+        accessibility_status.set(f"2. Accessibility: {permission_status_text(accessibility)}")
+        mirroring_status.set(
+            "3. iPhone Mirroring: Ready"
+            if locate_iphone_mirroring_window()
+            else "3. iPhone Mirroring: Open it and keep the phone window visible"
+        )
+        return identity_ready and screen_permission is True and accessibility is True
+
+    def check_again() -> None:
+        if refresh():
+            validation_status.set(
+                f"Validated: Screen Recording and Accessibility are granted to {canonical_app_path()}."
+            )
+        else:
+            validation_status.set(
+                "Not validated: approve both permissions for the verified app above, "
+                "then click Check again."
+            )
+
+    ttk.Label(status_frame, textvariable=identity_status).pack(anchor=tk.W, pady=2)
+    ttk.Label(status_frame, textvariable=screen_status).pack(anchor=tk.W, pady=2)
+    ttk.Label(status_frame, textvariable=accessibility_status).pack(anchor=tk.W, pady=2)
+    ttk.Label(status_frame, textvariable=mirroring_status).pack(anchor=tk.W, pady=2)
+    ttk.Label(status_frame, textvariable=validation_status, wraplength=640).pack(anchor=tk.W, pady=(8, 2))
+
+    actions = ttk.Frame(dialog)
+    actions.pack(fill=tk.X, padx=22, pady=(18, 8))
+
+    def open_screen() -> None:
+        request_screen_capture_permission()
+        open_mac_permissions("screen")
+
+    def open_accessibility() -> None:
+        request_accessibility_permission()
+        open_mac_permissions("accessibility")
+
+    ttk.Button(actions, text="Open Screen Recording", command=open_screen).pack(side=tk.LEFT)
+    ttk.Button(actions, text="Open Accessibility", command=open_accessibility).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Check again", command=check_again).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Done", command=dialog.destroy).pack(side=tk.RIGHT)
+    refresh()
+    if owns_root:
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.wait_window()
+        root.destroy()
 
 
 def screen_capture_permission() -> bool | None:
@@ -224,14 +403,28 @@ def screen_capture_permission() -> bool | None:
         return None
 
 
+def accessibility_block_reason() -> str | None:
+    permission = accessibility_permission()
+    if permission is False:
+        return (
+            f"macOS has not granted Accessibility to {permission_subject()}. "
+            "Open Bot Player setup, approve Bot Player.app in System Settings → "
+            "Privacy & Security → Accessibility, then check setup again."
+        )
+    return None
+
+
+def offer_mac_permissions() -> None:
+    show_permission_setup()
+
+
 def mirroring_capture_block_reason(target: MirroringWindow | None) -> str | None:
     permission = screen_capture_permission()
     if permission is False:
-        subject = "Bot Player" if getattr(sys, "frozen", False) else "Python and/or Terminal"
         return (
-            f"macOS has not granted Screen Recording to {subject}. Enable the matching "
-            "entry in System Settings → Privacy & Security → Screen Recording, then quit "
-            "the launcher completely and start it again."
+            f"macOS has not granted Screen Recording to {permission_subject()}. "
+            "Open Bot Player setup, approve Bot Player.app in System Settings → "
+            "Privacy & Security → Screen Recording, then check setup again."
         )
     if not target:
         return (
@@ -337,6 +530,177 @@ def active_unobscured_window(target: MirroringWindow) -> MirroringWindow | None:
 def screenshot(target: MirroringWindow) -> Image.Image:
     rect = target.rect
     return pyautogui.screenshot(region=(rect.x, rect.y, rect.width, rect.height)).convert("RGB")
+
+
+def swipe_mirrored_phone(
+    target: MirroringWindow,
+    start: tuple[float, float],
+    end: tuple[float, float],
+    duration: float = 0.55,
+) -> bool:
+    """Send one guarded swipe entirely inside the authenticated Mirroring window."""
+    current = active_unobscured_window(target)
+    if not current or CONNECTION_CHECK_STOP_REQUESTED.is_set():
+        return False
+    rect = current.rect
+    start_x = rect.x + start[0] * rect.width
+    start_y = rect.y + start[1] * rect.height
+    end_x = rect.x + end[0] * rect.width
+    end_y = rect.y + end[1] * rect.height
+    pyautogui.moveTo(start_x, start_y, duration=0.1)
+    current = active_unobscured_window(target)
+    if not current or CONNECTION_CHECK_STOP_REQUESTED.is_set():
+        return False
+    rect = current.rect
+    end_x = rect.x + end[0] * rect.width
+    end_y = rect.y + end[1] * rect.height
+    pyautogui.dragTo(end_x, end_y, duration=duration, button="left")
+    return True
+
+
+def tap_mirrored_phone(target: MirroringWindow, point: tuple[float, float]) -> bool:
+    """Move and tap only after a second, immediately-before-input safety check."""
+    current = active_unobscured_window(target)
+    if not current or CONNECTION_CHECK_STOP_REQUESTED.is_set():
+        return False
+    rect = current.rect
+    pyautogui.moveTo(rect.x + point[0] * rect.width, rect.y + point[1] * rect.height, duration=0.1)
+    if not active_unobscured_window(target) or CONNECTION_CHECK_STOP_REQUESTED.is_set():
+        return False
+    pyautogui.click()
+    return True
+
+
+def connection_check_active() -> bool:
+    return CONNECTION_CHECK_ACTIVE.is_set()
+
+
+def _run_connection_check(_args: argparse.Namespace | None = None) -> int:
+    """Demonstrate safe Mirroring input without starting game automation."""
+    if CONNECTION_CHECK_STOP_REQUESTED.is_set():
+        emit("stopped", "Connection check was stopped before it sent any input.")
+        return 1
+    if accessibility_permission() is not True:
+        emit(
+            "stopped",
+            f"Connection check needs Accessibility for {permission_subject()}. "
+            "Open Mac setup & permissions and approve Bot Player.app first.",
+        )
+        return 1
+    if screen_capture_permission() is not True:
+        emit(
+            "stopped",
+            f"Connection check needs Screen Recording for {permission_subject()}. "
+            "Open Mac setup & permissions and approve Bot Player.app first.",
+        )
+        return 1
+
+    target = locate_iphone_mirroring_window()
+    target = active_unobscured_window(target) if target else None
+    if not target:
+        emit(
+            "stopped",
+            "Connection check needs a visible, unobscured iPhone Mirroring window. "
+            "Open iPhone Mirroring and leave its phone window in view.",
+        )
+        return 1
+
+    try:
+        screenshot(target)
+        emit("checking", "Connection confirmed. Swiping to the iPhone Home Screen.")
+        if not swipe_mirrored_phone(target, (0.50, 0.92), (0.50, 0.48)):
+            emit("stopped", "The Mirroring window changed before the Home Screen swipe. No more input was sent.")
+            return 1
+        time.sleep(0.7)
+        target = active_unobscured_window(target)
+        if not target or CONNECTION_CHECK_STOP_REQUESTED.is_set():
+            emit("stopped", "The Mirroring window changed after the Home Screen swipe. No more input was sent.")
+            return 1
+        home_fingerprint = fingerprint(screenshot(target))
+        time.sleep(0.25)
+        target = active_unobscured_window(target)
+        if not target or CONNECTION_CHECK_STOP_REQUESTED.is_set():
+            emit("stopped", "The Mirroring window changed while confirming the Home Screen. No more input was sent.")
+            return 1
+        confirmed_home_fingerprint = fingerprint(screenshot(target))
+        if not fingerprints_stable(home_fingerprint, confirmed_home_fingerprint):
+            emit(
+                "stopped",
+                "Bot Player could not confirm a stable Home Screen before tapping an app. No app tap was sent.",
+            )
+            return 1
+
+        emit(
+            "checking",
+            "Opening the app in the upper-left Home Screen app slot. "
+            "The check will return to Home only after a visible change is confirmed.",
+        )
+        before_app = confirmed_home_fingerprint
+        if not tap_mirrored_phone(target, (0.25, 0.25)):
+            emit("stopped", "The Mirroring window changed before the app tap. No input was sent.")
+            return 1
+
+        opened = False
+        opened_fingerprint: bytes | None = None
+        current = target
+        for _ in range(8):
+            time.sleep(0.4)
+            current = active_unobscured_window(current)
+            if not current or CONNECTION_CHECK_STOP_REQUESTED.is_set():
+                emit("stopped", "The Mirroring window changed while opening the app. No close gesture was sent.")
+                return 1
+            current_fingerprint = fingerprint(screenshot(current))
+            if board_changed(before_app, current_fingerprint):
+                opened = True
+                opened_fingerprint = current_fingerprint
+                target = current
+                break
+        if not opened:
+            emit(
+                "stopped",
+                "The app slot did not visibly open. Bot Player stopped without sending a close gesture; "
+                "confirm an app is in the upper-left Home Screen slot and try again.",
+            )
+            return 1
+
+        emit("checking", "The app opened through iPhone Mirroring. Returning to the Home Screen.")
+        if not swipe_mirrored_phone(target, (0.50, 0.92), (0.50, 0.48)):
+            emit("stopped", "The Mirroring window changed before the close gesture. No more input was sent.")
+            return 1
+        time.sleep(0.7)
+        target = active_unobscured_window(target)
+        if not target or CONNECTION_CHECK_STOP_REQUESTED.is_set():
+            emit("stopped", "The Mirroring window changed while returning Home. Check the phone manually.")
+            return 1
+        returned_home = fingerprint(screenshot(target))
+        if (
+            opened_fingerprint is None
+            or not board_changed(opened_fingerprint, returned_home)
+            or not fingerprints_stable(confirmed_home_fingerprint, returned_home)
+        ):
+            emit(
+                "stopped",
+                "Bot Player could not visually confirm that the app returned to Home. "
+                "No further input was sent; check the phone manually.",
+            )
+            return 1
+    except pyautogui.FailSafeException:
+        emit("stopped", "PyAutoGUI fail-safe triggered. The connection check stopped immediately.")
+        return 1
+    except Exception as error:
+        emit("stopped", f"Connection check stopped safely: {error}")
+        return 1
+
+    emit("ready", "Connection check passed: Bot Player swiped, opened an app, and returned to the Home Screen.")
+    return 0
+
+
+def run_connection_check(_args: argparse.Namespace | None = None) -> int:
+    CONNECTION_CHECK_ACTIVE.set()
+    try:
+        return _run_connection_check(_args)
+    finally:
+        CONNECTION_CHECK_ACTIVE.clear()
 
 
 def recording_directory(game: str) -> Path:
@@ -1927,6 +2291,16 @@ def run_controller(args: argparse.Namespace) -> int:
                 icon_template=icon_template,
                 classifier=classifier,
             )
+            screen_capture_reason = None
+            if screen_capture_permission() is False:
+                screen_capture_reason = mirroring_capture_block_reason(target)
+            if screen_capture_reason:
+                player.stop(screen_capture_reason)
+                break
+            accessibility_reason = accessibility_block_reason()
+            if accessibility_reason:
+                player.stop(accessibility_reason)
+                break
             missing: list[str] = []
             if not classifier.ready:
                 missing.append("reviewed training examples")
@@ -1965,6 +2339,9 @@ def run_controller(args: argparse.Namespace) -> int:
 
 
 def capture_icon(args: argparse.Namespace, replacement_confirmed: bool = False) -> int:
+    if connection_check_active():
+        emit("ready", "Wait for the connection check to finish before changing the game icon.")
+        return 1
     if load_game_icon_template(args.game) and not replacement_confirmed:
         if args.icon_region:
             if not args.overwrite_game_icon:
@@ -2014,6 +2391,9 @@ def capture_icon(args: argparse.Namespace, replacement_confirmed: bool = False) 
 
 
 def capture_board_template(role: str, game: str, label: str | None = None, parent: Any = None) -> str | None:
+    if connection_check_active():
+        emit("ready", "Wait for the connection check to finish before capturing a board template.")
+        return None
     import tkinter as tk
     from tkinter import simpledialog
 
@@ -2072,9 +2452,11 @@ def run_status_window(args: argparse.Namespace) -> int:
     buttons.pack(fill=tk.X, padx=22)
     worker: threading.Thread | None = None
     recording_thread: threading.Thread | None = None
+    connection_thread: threading.Thread | None = None
     restore_backup_button: Any = None
     record_button: Any = None
     training_button: Any = None
+    connection_button: Any = None
     icon_button: Any = None
     status_queue: Queue[dict[str, Any]] = Queue()
 
@@ -2094,6 +2476,13 @@ def run_status_window(args: argparse.Namespace) -> int:
             messagebox.showinfo(
                 "Stop first",
                 "Stop Bot Player and save any recording before changing the game being trained.",
+                parent=root,
+            )
+            return
+        if connection_thread and connection_thread.is_alive():
+            messagebox.showinfo(
+                "Connection check is active",
+                "Wait for the connection check to finish before changing the game being trained.",
                 parent=root,
             )
             return
@@ -2136,6 +2525,9 @@ def run_status_window(args: argparse.Namespace) -> int:
         if recording_thread and recording_thread.is_alive():
             emit("ready", "Stop and save the recording before starting Bot Player.")
             return
+        if connection_thread and connection_thread.is_alive():
+            emit("ready", "Wait for the connection check to finish before starting Bot Player.")
+            return
         START_REQUESTED.set()
         start_button.configure(state=tk.DISABLED)
         record_button.configure(state=tk.DISABLED)
@@ -2147,6 +2539,55 @@ def run_status_window(args: argparse.Namespace) -> int:
             worker = threading.Thread(target=run_controller, args=(args,), daemon=True)
             worker.start()
 
+    def start_connection_check_from_ui() -> None:
+        nonlocal connection_thread
+        if START_REQUESTED.is_set():
+            messagebox.showinfo(
+                "Bot Player is running",
+                "Stop Bot Player before running the connection check. The check uses simple test gestures and no game templates.",
+                parent=root,
+            )
+            return
+        if recording_thread and recording_thread.is_alive():
+            messagebox.showinfo(
+                "Recording is active",
+                "Stop and save the recording before running the connection check.",
+                parent=root,
+            )
+            return
+        if connection_thread and connection_thread.is_alive():
+            return
+        if accessibility_permission() is not True or screen_capture_permission() is not True:
+            show_permission_setup(root)
+            emit(
+                "waiting",
+                "Grant Screen Recording and Accessibility to Bot Player.app, then run the connection check again.",
+            )
+            return
+        accepted = messagebox.askyesno(
+            "Test iPhone connection",
+            (
+                "Place any app in the upper-left app slot on the iPhone Home Screen and leave iPhone Mirroring visible.\n\n"
+                "Bot Player will swipe to Home, tap that app slot, wait for a visible app change, and swipe Home "
+                "again. This returns to the Home Screen rather than force-quitting the app. No game templates or "
+                "automated play will be used.\n\nContinue?"
+            ),
+            parent=root,
+            default=messagebox.NO,
+        )
+        if not accepted:
+            emit("ready", "Connection check cancelled. No test input was sent.")
+            return
+        CONNECTION_CHECK_STOP_REQUESTED.clear()
+        for button in (start_button, record_button, training_button, restore_backup_button, connection_button):
+            if button is not None:
+                button.configure(state=tk.DISABLED)
+        set_connection_sensitive_controls_state(tk.DISABLED)
+        connection_button.configure(text="Testing iPhone connection…")
+        connection_thread = threading.Thread(target=run_connection_check, args=(args,), daemon=True)
+        connection_thread.start()
+        root.after(100, wait_for_connection_check)
+
     def start_recording_from_ui() -> None:
         nonlocal recording_thread
         if START_REQUESTED.is_set():
@@ -2155,6 +2596,9 @@ def run_status_window(args: argparse.Namespace) -> int:
                 "Stop Bot Player before recording. Recording is observation-only and never runs alongside automated input.",
                 parent=root,
             )
+            return
+        if connection_thread and connection_thread.is_alive():
+            emit("ready", "Wait for the connection check to finish before recording.")
             return
         if recording_thread and recording_thread.is_alive():
             return
@@ -2171,12 +2615,17 @@ def run_status_window(args: argparse.Namespace) -> int:
 
     def check_mac_setup_from_ui() -> None:
         block_reason = mirroring_capture_block_reason(locate_iphone_mirroring_window())
+        accessibility_reason = accessibility_block_reason()
+        show_permission_setup(root)
         if block_reason:
             emit("waiting", block_reason)
             return
+        if accessibility_reason:
+            emit("waiting", accessibility_reason)
+            return
         emit(
             "ready",
-            "Screen Recording is active and iPhone Mirroring is ready. You can start a recording or import local footage.",
+            "Screen Recording and Accessibility are active, and iPhone Mirroring is ready. You can start a recording or import local footage.",
         )
 
     def stop_recording_from_ui() -> None:
@@ -2185,6 +2634,13 @@ def run_status_window(args: argparse.Namespace) -> int:
         wait_for_recording_stop()
 
     def import_training_from_ui() -> None:
+        if connection_thread and connection_thread.is_alive():
+            messagebox.showinfo(
+                "Connection check is active",
+                "Wait for the connection check to finish before importing training footage.",
+                parent=root,
+            )
+            return
         if not training_import_allowed(bool(recording_thread and recording_thread.is_alive())):
             messagebox.showinfo(
                 "Stop before importing",
@@ -2241,6 +2697,8 @@ def run_status_window(args: argparse.Namespace) -> int:
     begin_training_button.pack(side=tk.LEFT)
     start_button = ttk.Button(buttons, text="Start Bot Player", command=start_controller)
     start_button.pack(side=tk.LEFT)
+    connection_button = ttk.Button(buttons, text="Test iPhone connection", command=start_connection_check_from_ui)
+    connection_button.pack(side=tk.LEFT, padx=(10, 0))
     record_button = ttk.Button(buttons, text="Start Recording Session", command=start_recording_from_ui)
     record_button.pack(side=tk.LEFT, padx=(10, 0))
     training_button = ttk.Button(buttons, text="Import Training Footage", command=import_training_from_ui)
@@ -2264,7 +2722,11 @@ def run_status_window(args: argparse.Namespace) -> int:
         wraplength=640,
     )
     recording_help.pack(anchor=tk.W, padx=22, pady=(10, 0))
-    permission_button = ttk.Button(buttons, text="Open Mac permissions", command=open_mac_permissions)
+    permission_button = ttk.Button(
+        buttons,
+        text="Mac setup & permissions",
+        command=lambda: show_permission_setup(root),
+    )
     permission_button.pack(side=tk.LEFT, padx=(12, 0))
     ttk.Button(buttons, text="Check setup", command=check_mac_setup_from_ui).pack(side=tk.LEFT, padx=(8, 0))
     footer = ttk.Label(
@@ -2353,6 +2815,9 @@ def run_status_window(args: argparse.Namespace) -> int:
         )
 
     def capture_icon_from_setup() -> None:
+        if connection_thread and connection_thread.is_alive():
+            emit("ready", "Wait for the connection check to finish before changing the game icon.")
+            return
         if load_game_icon_template(args.game) and not confirm_change(
             "Replace game icon?",
             f"Replace the saved {args.game} icon capture? This only changes local setup and is used on the next Start.",
@@ -2362,6 +2827,9 @@ def run_status_window(args: argparse.Namespace) -> int:
         refresh_library()
 
     def capture_board_from_setup(role: str) -> None:
+        if connection_thread and connection_thread.is_alive():
+            emit("ready", "Wait for the connection check to finish before capturing a board template.")
+            return
         role_name = "board item" if role == "pile" else "target"
         label = simpledialog.askstring(
             "Bot Player",
@@ -2503,8 +2971,22 @@ def run_status_window(args: argparse.Namespace) -> int:
 
     refresh_library()
 
+    def set_connection_sensitive_controls_state(state: str) -> None:
+        def update_buttons(container: Any) -> None:
+            for child in container.winfo_children():
+                if child.winfo_class() in {"Button", "TButton"}:
+                    child.configure(state=state)
+                update_buttons(child)
+
+        update_buttons(setup)
+        update_buttons(library)
+
     def enable_start_after_stop() -> None:
-        if (worker and worker.is_alive()) or (recording_thread and recording_thread.is_alive()):
+        if (
+            (worker and worker.is_alive())
+            or (recording_thread and recording_thread.is_alive())
+            or (connection_thread and connection_thread.is_alive())
+        ):
             root.after(50, enable_start_after_stop)
             return
         START_REQUESTED.clear()
@@ -2512,9 +2994,23 @@ def run_status_window(args: argparse.Namespace) -> int:
             start_button.configure(state=tk.NORMAL)
             record_button.configure(text="Start Recording Session", state=tk.NORMAL, command=start_recording_from_ui)
             training_button.configure(state=tk.NORMAL, text="Import Training Footage")
+        connection_button.configure(text="Test iPhone connection", state=tk.NORMAL)
         if restore_backup_button is not None:
             restore_backup_button.configure(state=tk.NORMAL)
         stop_button.configure(text="Stop Bot Player", command=STOP_REQUESTED.set)
+
+    def wait_for_connection_check() -> None:
+        if connection_thread and connection_thread.is_alive():
+            root.after(80, wait_for_connection_check)
+            return
+        set_connection_sensitive_controls_state(tk.NORMAL)
+        connection_button.configure(text="Test iPhone connection", state=tk.NORMAL)
+        if not START_REQUESTED.is_set() and not (recording_thread and recording_thread.is_alive()):
+            start_button.configure(state=tk.NORMAL)
+            record_button.configure(text="Start Recording Session", state=tk.NORMAL, command=start_recording_from_ui)
+            training_button.configure(state=tk.NORMAL, text="Import Training Footage")
+            if restore_backup_button is not None:
+                restore_backup_button.configure(state=tk.NORMAL)
 
     def wait_for_recording_stop() -> None:
         if recording_thread and recording_thread.is_alive():
@@ -2526,7 +3022,11 @@ def run_status_window(args: argparse.Namespace) -> int:
             start_button.configure(state=tk.NORMAL)
 
     def close_when_stopped() -> None:
-        if (worker and worker.is_alive()) or (recording_thread and recording_thread.is_alive()):
+        if (
+            (worker and worker.is_alive())
+            or (recording_thread and recording_thread.is_alive())
+            or (connection_thread and connection_thread.is_alive())
+        ):
             root.after(80, close_when_stopped)
             return
         root.destroy()
@@ -2534,7 +3034,9 @@ def run_status_window(args: argparse.Namespace) -> int:
     def request_stop() -> None:
         STOP_REQUESTED.set()
         RECORDING_STOP_REQUESTED.set()
+        CONNECTION_CHECK_STOP_REQUESTED.set()
         start_button.configure(state=tk.DISABLED)
+        connection_button.configure(state=tk.DISABLED)
         record_button.configure(state=tk.DISABLED)
         training_button.configure(state=tk.DISABLED)
         stop_button.configure(text="Stopping…", state=tk.DISABLED)
@@ -2565,9 +3067,11 @@ def run_status_window(args: argparse.Namespace) -> int:
     STATUS_SINK = status_queue.put
 
     RECORDING_STOP_REQUESTED.clear()
+    CONNECTION_CHECK_STOP_REQUESTED.clear()
     worker = threading.Thread(target=run_controller, args=(args,), daemon=True)
     worker.start()
     root.after(80, drain_status_queue)
+    root.after(220, lambda: show_permission_setup(root))
     root.mainloop()
     STATUS_SINK = None
     return 0
@@ -2584,7 +3088,6 @@ def main() -> int:
     if args.cli:
         offer_mac_permissions()
         return run_controller(args)
-    offer_mac_permissions()
     return run_status_window(args)
 
 

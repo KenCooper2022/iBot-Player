@@ -48,13 +48,27 @@ available in this source beta package.
    launches.
 4. The launcher finds Python, installs it through Homebrew if needed, creates a
    private `.bot-player-venv` beside the launcher, installs the required
-   packages, builds a real **Bot Player.app**, and opens it. If Homebrew is
-   missing, the launcher asks before using Homebrew's official installer.
-5. Approve **Bot Player**—not Python—in Screen Recording and Accessibility.
-   After the first build, double-clicking the launcher opens the existing app
-   quickly; the Terminal window is no longer needed while Bot Player runs. If
-   you extract a newer test ZIP into the same folder, the launcher detects the
-   updated controller and rebuilds the local app automatically.
+   packages, builds a real **Bot Player.app**, installs it in `~/Applications`,
+   and opens it. If Homebrew is missing, the launcher asks before using
+   Homebrew's official installer.
+5. In Bot Player, open **Mac setup & permissions** and approve **Bot Player.app**
+   in Screen Recording and Accessibility. The checklist shows the exact app
+   identity and opens one privacy pane at a time.
+6. Once both permissions are ready, choose **Test iPhone connection** to confirm
+   real input works. Place any app in the upper-left Home Screen app slot,
+   approve the test prompt, and Bot Player will swipe Home, open that app,
+   verify a visible change, then swipe Home again.
+7. Later double-clicks only open the installed app. They do not rebuild it
+   because source files changed, so the approval remains attached to the same
+   app bundle.
+8. To deliberately install a newer beta, double-click **Build Bot Player.command**
+   and type `REBUILD`. That replacement can require one new macOS approval
+   because this source beta uses ad-hoc signing.
+
+The ZIP includes a `dist/` staging folder so the build output has a predictable
+place to appear. It starts with instructions only: the real
+`dist/Bot Player.app` is created by PyInstaller on macOS, then copied to
+`~/Applications/Bot Player.app`.
 
 ## Optional standalone app build
 
@@ -62,20 +76,19 @@ The optional builder is useful if you want a normal `.app` after the first
 test:
 
 1. Double-click **Build Bot Player.command**.
-2. Allow Terminal to run it if macOS asks.
-3. The script installs the Python dependencies, creates the standalone
-   **Bot Player.app**, and opens it automatically.
-4. After the build, the app itself is a normal Finder app: double-click
-   **Bot Player.app** to run it again. Python, Terminal, Node, and the browser
-   are not needed after the build.
+2. Read the replacement warning, type `REBUILD`, and allow the command to run
+   if macOS asks.
+3. The command replaces the installed `~/Applications/Bot Player.app` and opens
+   it automatically.
+4. Approve Bot Player.app again only if macOS asks after this deliberate update.
 
 ## First-run test
 
 1. Accept the Bot Player safety notice.
-2. Approve Screen Recording and Accessibility when macOS opens their settings.
-   These approvals must be made by the user and cannot be automated.
-   When using the source launcher, enable the matching **Python** and/or
-   **Terminal** entry; when using the packaged app, enable **Bot Player**.
+2. Open **Mac setup & permissions**. Approve Screen Recording and Accessibility
+   when macOS opens their settings. These approvals must be made by the user
+   and cannot be automated. Approve **Bot Player.app** at
+   `~/Applications/Bot Player.app`.
 3. Bot Player opens iPhone Mirroring and waits for its authenticated window.
 4. The user must manually open **Block Jam 3D** on the mirrored iPhone. The
    game icon is included in Bot Player, so testers do not need to capture or

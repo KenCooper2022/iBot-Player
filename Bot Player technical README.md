@@ -15,10 +15,10 @@ running API server.
    If macOS cannot find it, open it from Applications or Spotlight. The user
    must manually open the selected game on the mirrored iPhone; Bot Player does
    not open the game during recording.
-4. Use **Open Mac permissions** when prompted. Turn on Bot Player in both
-   **Screen Recording** and **Accessibility** in macOS System Settings, then
-   return to Bot Player. macOS requires the user to approve these permissions;
-   the app cannot silently grant them.
+4. Use **Mac setup & permissions** when prompted. Turn on Bot Player.app in
+   both **Screen Recording** and **Accessibility** in macOS System Settings,
+   then return to Bot Player. macOS requires the user to approve these
+   permissions; the app cannot silently grant them.
 5. **Block Jam 3D** includes a built-in game-icon template, so its first-use
    setup does not ask the tester to supply or capture the app icon. Other games
    still require their own local icon capture. Bot Player captures only the
@@ -126,13 +126,27 @@ exported or restored.
 For the easiest test, double-click `DOUBLE-CLICK-TO-RUN (Mac).command`.
 Following the same pattern as the Audio Stream Miner launcher, it finds Python,
 creates a private `.bot-player-venv`, installs the required packages, builds a
-real `Bot Player.app`, and opens that app. The first build may take a few
-minutes; later launches open the existing app directly. Because the beta is
-not notarized, the first launch may require Control-click → **Open**.
+real `Bot Player.app`, installs it in `~/Applications`, and opens that app. The
+first build may take a few minutes; later launches open the same installed app
+directly and intentionally ignore changed source-file timestamps. Because the
+beta is not notarized, the first launch may require Control-click → **Open**.
 
 The packaged app is important for macOS privacy permissions: enable
-**Bot Player** in Screen Recording and Accessibility, rather than trying to
-authorize the Python interpreter used only to prepare the app.
+**Bot Player.app** in Screen Recording and Accessibility. The app's **Mac setup
+& permissions** checklist identifies the exact installed app and opens the two
+separate privacy panes one at a time.
+
+To deliberately install a changed beta, use `Build Bot Player.command` and
+type `REBUILD` at its confirmation prompt. Replacing an ad-hoc-signed app can
+make macOS request Screen Recording and Accessibility approval again; normal
+launches never replace the approved app automatically.
+
+After both permissions are approved, use **Test iPhone connection** for a
+limited end-to-end input check. Put any app in the upper-left Home Screen app
+slot first. After you confirm, Bot Player swipes to Home, taps that slot, waits
+for the screen to change, then swipes Home again. It returns to the Home Screen
+instead of force-quitting the app and stops without the return swipe if opening
+the app cannot be visually confirmed.
 
 ## Build the standalone Mac app without Xcode
 
@@ -150,6 +164,10 @@ into a hidden-console, double-clickable `dist/Bot Player.app`, then creates
 project or Swift compiler is used. PyInstaller and the Python packages are
 downloaded when the maintainer builds a release; end users receive the
 finished app and do not need Python, pip, Node, or a terminal.
+
+This standalone build is a changed ad-hoc app bundle. Move it to Applications
+before granting permissions; replacing an earlier bundle can require a new
+macOS approval.
 
 The previous `desktop/macos/build-macos.sh` path remains as a compatibility
 launcher and forwards to this Python build.

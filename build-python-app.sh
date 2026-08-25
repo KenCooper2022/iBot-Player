@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST_DIR="$SCRIPT_DIR/dist"
+BUILD_REVISION="2026-08-25-stable-permission-identity"
 
 if [[ ! -f "$SCRIPT_DIR/block-jam-3d-icon.png" ]]; then
   echo "The bundled Block Jam 3D icon is missing from this package." >&2
@@ -28,6 +29,8 @@ if [[ ! -x "$APP_EXECUTABLE" ]]; then
   echo "PyInstaller did not create a double-clickable Bot Player.app." >&2
   exit 1
 fi
+mkdir -p "$APP_PATH/Contents/Resources"
+printf '%s\n' "$BUILD_REVISION" > "$APP_PATH/Contents/Resources/bot-player-build-revision.txt"
 
 DMG_ROOT="$DIST_DIR/dmg-root"
 rm -rf "$DMG_ROOT"
@@ -37,4 +40,5 @@ ln -s /Applications "$DMG_ROOT/Applications"
 hdiutil create -volname "Bot Player" -srcfolder "$DMG_ROOT" -ov -format UDZO "$DIST_DIR/Bot-Player-macOS.dmg"
 rm -rf "$DMG_ROOT"
 echo "Created $DIST_DIR/Bot-Player-macOS.dmg without an Xcode build."
-echo "Double-click $APP_PATH to open the complete Bot Player app, or drag it to Applications first."
+echo "This is a new ad-hoc app build. Move it to Applications before granting permissions;"
+echo "replacing an already-approved Bot Player.app can require approval again."
