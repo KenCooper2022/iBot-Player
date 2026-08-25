@@ -294,7 +294,10 @@ def permission_identity_status_text() -> str:
     )
 
 
-def show_permission_setup(parent: Any = None) -> None:
+def show_permission_setup(
+    parent: Any = None,
+    on_validation: Callable[[bool], None] | None = None,
+) -> None:
     """Show a guided checklist for the exact packaged app requesting access."""
     import tkinter as tk
     from tkinter import ttk
@@ -326,7 +329,7 @@ def show_permission_setup(parent: Any = None) -> None:
         text=(
             "These permissions are separate. Approve the app shown above, not a Python "
             "interpreter. If you deliberately install a newer beta, macOS may ask again "
-            "because its ad-hoc app contents changed."
+            "because the installed app changed."
         ),
         justify=tk.LEFT,
         wraplength=590,
@@ -355,7 +358,8 @@ def show_permission_setup(parent: Any = None) -> None:
         return identity_ready and screen_permission is True and accessibility is True
 
     def check_again() -> None:
-        if refresh():
+        validated = refresh()
+        if validated:
             validation_status.set(
                 f"Validated: Screen Recording and Accessibility are granted to {canonical_app_path()}."
             )
@@ -364,6 +368,8 @@ def show_permission_setup(parent: Any = None) -> None:
                 "Not validated: approve both permissions for the verified app above, "
                 "then click Check again."
             )
+        if on_validation:
+            on_validation(validated)
 
     ttk.Label(status_frame, textvariable=identity_status).pack(anchor=tk.W, pady=2)
     ttk.Label(status_frame, textvariable=screen_status).pack(anchor=tk.W, pady=2)
@@ -405,9 +411,10 @@ def screen_capture_permission() -> bool | None:
 
 def accessibility_block_reason() -> str | None:
     permission = accessibility_permission()
-    if permission is False:
+    if permission is not True:
+        status = "has not granted" if permission is False else "could not verify"
         return (
-            f"macOS has not granted Accessibility to {permission_subject()}. "
+            f"macOS {status} Accessibility for {permission_subject()}. "
             "Open Bot Player setup, approve Bot Player.app in System Settings → "
             "Privacy & Security → Accessibility, then check setup again."
         )
@@ -420,9 +427,10 @@ def offer_mac_permissions() -> None:
 
 def mirroring_capture_block_reason(target: MirroringWindow | None) -> str | None:
     permission = screen_capture_permission()
-    if permission is False:
+    if permission is not True:
+        status = "has not granted" if permission is False else "could not verify"
         return (
-            f"macOS has not granted Screen Recording to {permission_subject()}. "
+            f"macOS {status} Screen Recording for {permission_subject()}. "
             "Open Bot Player setup, approve Bot Player.app in System Settings → "
             "Privacy & Security → Screen Recording, then check setup again."
         )
@@ -532,6 +540,33 @@ def screenshot(target: MirroringWindow) -> Image.Image:
     return pyautogui.screenshot(region=(rect.x, rect.y, rect.width, rect.height)).convert("RGB")
 
 
+def post_native_mouse_event(event_type: int, x: float, y: float) -> bool:
+    """Post one native Quartz mouse event, returning False when macOS cannot accept it."""
+    create_event = getattr(Quartz, "CGEventCreateMouseEvent", None)
+    post_event = getattr(Quartz, "CGEventPost", None)
+    event_tap = getattr(Quartz, "kCGHIDEventTap", None)
+    left_button = getattr(Quartz, "kCGMouseButtonLeft", None)
+    if not callable(create_event) or not callable(post_event) or event_tap is None or left_button is None:
+        return False
+    try:
+        event = create_event(None, event_type, (round(x), round(y)), left_button)
+        if event is None:
+            return False
+        post_event(event_tap, event)
+    except Exception:
+        return False
+    return True
+
+
+def native_tap(x: float, y: float) -> bool:
+    """Send a native left-button tap at an already safety-checked screen coordinate."""
+    down = getattr(Quartz, "kCGEventLeftMouseDown", None)
+    up = getattr(Quartz, "kCGEventLeftMouseUp", None)
+    if down is None or up is None or not post_native_mouse_event(down, x, y):
+        return False
+    return post_native_mouse_event(up, x, y)
+
+
 def swipe_mirrored_phone(
     target: MirroringWindow,
     start: tuple[float, float],
@@ -547,15 +582,37 @@ def swipe_mirrored_phone(
     start_y = rect.y + start[1] * rect.height
     end_x = rect.x + end[0] * rect.width
     end_y = rect.y + end[1] * rect.height
-    pyautogui.moveTo(start_x, start_y, duration=0.1)
+    moved = getattr(Quartz, "kCGEventMouseMoved", None)
+    down = getattr(Quartz, "kCGEventLeftMouseDown", None)
+    dragged = getattr(Quartz, "kCGEventLeftMouseDragged", None)
+    up = getattr(Quartz, "kCGEventLeftMouseUp", None)
+    if None in (moved, down, dragged, up) or not post_native_mouse_event(moved, start_x, start_y):
+        return False
     current = active_unobscured_window(target)
     if not current or CONNECTION_CHECK_STOP_REQUESTED.is_set():
         return False
     rect = current.rect
     end_x = rect.x + end[0] * rect.width
     end_y = rect.y + end[1] * rect.height
-    pyautogui.dragTo(end_x, end_y, duration=duration, button="left")
-    return True
+    if not post_native_mouse_event(down, start_x, start_y):
+        return False
+    released = False
+    try:
+        steps = max(2, min(18, round(duration / 0.04)))
+        for step in range(1, steps + 1):
+            if CONNECTION_CHECK_STOP_REQUESTED.is_set():
+                return False
+            progress = step / steps
+            x = start_x + (end_x - start_x) * progress
+            y = start_y + (end_y - start_y) * progress
+            if not post_native_mouse_event(dragged, x, y):
+                return False
+            time.sleep(duration / steps)
+        released = post_native_mouse_event(up, end_x, end_y)
+        return released
+    finally:
+        if not released:
+            post_native_mouse_event(up, end_x, end_y)
 
 
 def tap_mirrored_phone(target: MirroringWindow, point: tuple[float, float]) -> bool:
@@ -564,11 +621,14 @@ def tap_mirrored_phone(target: MirroringWindow, point: tuple[float, float]) -> b
     if not current or CONNECTION_CHECK_STOP_REQUESTED.is_set():
         return False
     rect = current.rect
-    pyautogui.moveTo(rect.x + point[0] * rect.width, rect.y + point[1] * rect.height, duration=0.1)
+    x = rect.x + point[0] * rect.width
+    y = rect.y + point[1] * rect.height
+    moved = getattr(Quartz, "kCGEventMouseMoved", None)
+    if moved is None or not post_native_mouse_event(moved, x, y):
+        return False
     if not active_unobscured_window(target) or CONNECTION_CHECK_STOP_REQUESTED.is_set():
         return False
-    pyautogui.click()
-    return True
+    return native_tap(x, y)
 
 
 def connection_check_active() -> bool:
@@ -2095,8 +2155,14 @@ class BotPlayer:
         if STOP_REQUESTED.is_set() or not active_unobscured_window(current):
             self.stop("iPhone Mirroring changed, was covered, or Stop was requested before the tap. Stopped safely.")
             return False
+        accessibility_reason = accessibility_block_reason()
+        if accessibility_reason:
+            self.stop(accessibility_reason)
+            return False
         rect = current.rect
-        pyautogui.click(rect.x + fresh_match.x * rect.width, rect.y + fresh_match.y * rect.height)
+        if not native_tap(rect.x + fresh_match.x * rect.width, rect.y + fresh_match.y * rect.height):
+            self.stop("macOS did not accept the native Accessibility event. Stopped safely.")
+            return False
         return True
 
     def ingest(self, target: MirroringWindow, frame: Image.Image) -> None:
@@ -2614,19 +2680,29 @@ def run_status_window(args: argparse.Namespace) -> int:
         recording_thread.start()
 
     def check_mac_setup_from_ui() -> None:
-        block_reason = mirroring_capture_block_reason(locate_iphone_mirroring_window())
-        accessibility_reason = accessibility_block_reason()
-        show_permission_setup(root)
-        if block_reason:
-            emit("waiting", block_reason)
-            return
-        if accessibility_reason:
-            emit("waiting", accessibility_reason)
-            return
-        emit(
-            "ready",
-            "Screen Recording and Accessibility are active, and iPhone Mirroring is ready. You can start a recording or import local footage.",
-        )
+        def report_validation(validated: bool) -> None:
+            block_reason = mirroring_capture_block_reason(locate_iphone_mirroring_window())
+            accessibility_reason = accessibility_block_reason()
+            if not validated:
+                emit(
+                    "waiting",
+                    "Mac permission setup is not validated yet. Confirm the installed app path and both approvals, "
+                    "then click Check again in the setup window.",
+                )
+                return
+            if block_reason:
+                emit("waiting", block_reason)
+                return
+            if accessibility_reason:
+                emit("waiting", accessibility_reason)
+                return
+            emit(
+                "ready",
+                "Screen Recording and Accessibility are active, and iPhone Mirroring is ready. "
+                "You can start a recording or import local footage.",
+            )
+
+        show_permission_setup(root, on_validation=report_validation)
 
     def stop_recording_from_ui() -> None:
         RECORDING_STOP_REQUESTED.set()

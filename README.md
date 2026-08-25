@@ -62,8 +62,9 @@ available in this source beta package.
    because source files changed, so the approval remains attached to the same
    app bundle.
 8. To deliberately install a newer beta, double-click **Build Bot Player.command**
-   and type `REBUILD`. That replacement can require one new macOS approval
-   because this source beta uses ad-hoc signing.
+   and type `REBUILD`. The source package requires a Developer ID Application
+   or Apple Development signing certificate on the Mac that performs the build.
+   A replacement can still require one new macOS approval.
 
 The ZIP includes a `dist/` staging folder so the build output has a predictable
 place to appear. It starts with instructions only: the real

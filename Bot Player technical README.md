@@ -137,9 +137,9 @@ The packaged app is important for macOS privacy permissions: enable
 separate privacy panes one at a time.
 
 To deliberately install a changed beta, use `Build Bot Player.command` and
-type `REBUILD` at its confirmation prompt. Replacing an ad-hoc-signed app can
-make macOS request Screen Recording and Accessibility approval again; normal
-launches never replace the approved app automatically.
+type `REBUILD` at its confirmation prompt. Replacing the app can make macOS
+request Screen Recording and Accessibility approval again; normal launches
+never replace the approved app automatically.
 
 After both permissions are approved, use **Test iPhone connection** for a
 limited end-to-end input check. Put any app in the upper-left Home Screen app
@@ -159,15 +159,18 @@ chmod +x build-python-app.sh
 ```
 
 The script installs the Python wheels and uses PyInstaller to bundle Python
-into a hidden-console, double-clickable `dist/Bot Player.app`, then creates
-`dist/Bot-Player-macOS.dmg` with the app and an Applications shortcut. No Xcode
-project or Swift compiler is used. PyInstaller and the Python packages are
-downloaded when the maintainer builds a release; end users receive the
-finished app and do not need Python, pip, Node, or a terminal.
+into a hidden-console, double-clickable `dist/Bot Player.app`, then signs the
+native code and app bundle with the hardened runtime before creating
+`dist/Bot-Player-macOS.dmg`. No Xcode project or Swift compiler is used.
+PyInstaller and the Python packages are downloaded when the maintainer builds
+a release; end users receive the finished app and do not need Python, pip,
+Node, or a terminal.
 
-This standalone build is a changed ad-hoc app bundle. Move it to Applications
-before granting permissions; replacing an earlier bundle can require a new
-macOS approval.
+The builder requires a **Developer ID Application** certificate (preferred for
+distribution) or an **Apple Development** certificate (local testing) in the
+Mac's keychain. It refuses to create an unsigned or ad-hoc-signed app. Set
+`BOT_PLAYER_SIGNING_IDENTITY` to choose a specific installed certificate.
+Notarize the signed DMG with Apple before distributing it outside your team.
 
 The previous `desktop/macos/build-macos.sh` path remains as a compatibility
 launcher and forwards to this Python build.

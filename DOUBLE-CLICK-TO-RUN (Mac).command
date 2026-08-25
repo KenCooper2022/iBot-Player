@@ -22,7 +22,7 @@ fi
 
 APP_PATH="$HOME/Applications/Bot Player.app"
 APP_EXECUTABLE="$APP_PATH/Contents/MacOS/Bot Player"
-BUILD_REVISION="2026-08-25-stable-permission-identity"
+BUILD_REVISION="2026-08-25-signed-quartz-input"
 APP_REVISION_FILE="$APP_PATH/Contents/Resources/bot-player-build-revision.txt"
 STAGED_APP_PATH="$SCRIPT_DIR/dist/Bot Player.app"
 STAGED_APP_EXECUTABLE="$STAGED_APP_PATH/Contents/MacOS/Bot Player"
@@ -44,7 +44,7 @@ if [[ "$REBUILD_REQUESTED" != true && -x "$APP_EXECUTABLE" ]]; then
   if [[ ! -f "$APP_REVISION_FILE" || "$(cat "$APP_REVISION_FILE" 2>/dev/null)" != "$BUILD_REVISION" ]]; then
     echo "  A newer Bot Player package is available, but the approved app will not be replaced automatically."
     echo "  To install it deliberately, double-click Build Bot Player.command."
-    echo "  Replacing an ad-hoc app can require Screen Recording and Accessibility approval again."
+    echo "  Replacing the app can require Screen Recording and Accessibility approval again."
   else
     echo "  Opening the existing approved Bot Player.app..."
   fi
@@ -54,7 +54,7 @@ fi
 
 if [[ "$REBUILD_REQUESTED" == true && -x "$APP_EXECUTABLE" ]]; then
   echo "  Rebuilding will replace $APP_PATH."
-  echo "  Because this beta uses ad-hoc signing, macOS may require you to approve Bot Player again."
+  echo "  The new build must be signed with a certificate in this Mac's keychain."
 else
   echo "  Bot Player.app is not installed yet. Building it once for $APP_PATH..."
 fi
@@ -175,9 +175,14 @@ if [[ ! -x "$STAGED_APP_EXECUTABLE" ]]; then
   read -r -p "  Press Return to close..." _
   exit 1
 fi
-
 mkdir -p "$(dirname "$STAGED_REVISION_FILE")"
 printf '%s\n' "$BUILD_REVISION" > "$STAGED_REVISION_FILE"
+bash "$SCRIPT_DIR/sign-macos-app.sh" "$STAGED_APP_PATH" || {
+  echo "  [ERROR] Bot Player.app was not signed. The installed app was left unchanged."
+  read -r -p "  Press Return to close..." _
+  exit 1
+}
+
 INSTALL_DIRECTORY="$(dirname "$APP_PATH")"
 INSTALL_STAGING_PATH="$INSTALL_DIRECTORY/.Bot Player.app.installing"
 INSTALL_BACKUP_PATH="$INSTALL_DIRECTORY/.Bot Player.app.previous"

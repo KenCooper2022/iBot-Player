@@ -7,4 +7,6 @@ On macOS, run **Build Bot Player.command** and type `REBUILD`. PyInstaller
 creates `dist/Bot Player.app` here, then the launcher installs that same bundle
 at `~/Applications/Bot Player.app`. A prebuilt app is not included because
 this package is assembled outside macOS and the bundle must be built on the
-Mac where it will run.
+Mac where it will run. The Mac performing the build needs a Developer ID
+Application or Apple Development signing certificate; unsigned app bundles are
+not produced.
