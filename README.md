@@ -58,18 +58,33 @@ available in this source beta package.
    real input works. Place any app in the upper-left Home Screen app slot,
    approve the test prompt, and Bot Player will swipe Home, open that app,
    verify a visible change, then swipe Home again.
-7. Later double-clicks only open the installed app. They do not rebuild it
-   because source files changed, so the approval remains attached to the same
-   app bundle.
-8. To deliberately install a newer beta, double-click **Build Bot Player.command**
-   and type `REBUILD`. The source package requires a Developer ID Application
-   or Apple Development signing certificate on the Mac that performs the build.
-   A replacement can still require one new macOS approval.
+7. Later double-clicks open the installed app when its build revision matches.
+   If this package has a newer revision, the launcher rebuilds and replaces the
+   same `~/Applications/Bot Player.app` path so macOS evaluates the current
+   signed app.
+8. To force a replacement even when revisions match, double-click **Build Bot
+   Player.command** and type `REBUILD`. The local beta build requires an Apple
+   Development signing certificate on the Mac that performs the build. A
+   replacement can still require one new macOS approval.
 
 The ZIP includes a `dist/` staging folder so the build output has a predictable
 place to appear. It starts with instructions only: the real
 `dist/Bot Player.app` is created by PyInstaller on macOS, then copied to
 `~/Applications/Bot Player.app`.
+
+In **Mac setup & permissions**, click **Check again** after approval. The
+checklist shows the running app's Apple signing authority and Team ID, checks
+Screen Recording and Accessibility, and performs a one-frame capture test of
+iPhone Mirroring by its authenticated macOS window ID so permission and
+capture failures are distinguishable. Recording and template capture use this
+window-specific path; automated input still stops if any window overlaps the
+Mirroring region.
+
+If System Settings shows **Bot Player** as allowed but the checklist still says
+denied, select **Stale-permission cleanup** in the checklist. Quit Bot Player,
+run the two displayed `tccutil reset` commands in Terminal, reopen
+`~/Applications/Bot Player.app`, and approve the new prompts. The commands
+reset only Bot Player's old macOS privacy entries.
 
 ## Optional standalone app build
 

@@ -294,13 +294,89 @@ def permission_identity_status_text() -> str:
     )
 
 
+def code_signature_status() -> tuple[bool, str]:
+    """Return whether the running app has a stable Apple signing identity."""
+    app_path = running_app_path() or canonical_app_path()
+    if sys.platform != "darwin":
+        return False, "Code signature: Unavailable outside macOS"
+    if not app_path.exists():
+        return False, f"Code signature: App bundle is missing at {app_path}"
+    try:
+        details = subprocess.run(
+            ["codesign", "-dv", "--verbose=4", str(app_path)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as error:
+        return False, f"Code signature: Could not run codesign ({error})"
+    output = f"{details.stdout}\n{details.stderr}"
+    fields = {
+        key: value
+        for key, _, value in (
+            line.partition("=")
+            for line in output.splitlines()
+            if "=" in line
+        )
+    }
+    authority = next(
+        (line.partition("=")[2] for line in output.splitlines() if line.startswith("Authority=")),
+        "",
+    )
+    identifier = fields.get("Identifier", "")
+    team_id = fields.get("TeamIdentifier", "")
+    if details.returncode != 0:
+        return False, "Code signature: codesign could not inspect this app"
+    if identifier != APP_BUNDLE_IDENTIFIER:
+        return False, f"Code signature: Unexpected bundle identifier {identifier or 'not set'}"
+    if team_id in {"", "not set"}:
+        return False, "Code signature: Team ID is not set"
+    if not authority.startswith(("Apple Development: ", "Developer ID Application: ")):
+        return False, f"Code signature: Unsupported authority {authority or 'not set'}"
+    try:
+        verification = subprocess.run(
+            ["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app_path)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as error:
+        return False, f"Code signature: Could not verify this app ({error})"
+    if verification.returncode != 0:
+        return False, "Code signature: Signature verification failed"
+    return True, f"Code signature: {authority}\nTeam ID: {team_id}"
+
+
+def mirroring_capture_test(
+    target: MirroringWindow | None,
+    screen_permission: bool | None = None,
+) -> tuple[bool | None, str]:
+    """Capture one frame to distinguish a permission result from an actual capture failure."""
+    if screen_permission is not True:
+        return None, "4. Capture test: Waiting for Screen Recording approval"
+    if target is None:
+        return None, "4. Capture test: Open iPhone Mirroring first"
+    try:
+        frame = screenshot(target)
+        width, height = frame.size
+        if width < 2 or height < 2:
+            return False, "4. Capture test: Failed — Mirroring frame was empty"
+        histogram = frame.convert("L").histogram()
+        visible_bins = sum(1 for count in histogram if count)
+        if visible_bins < 2:
+            return False, "4. Capture test: Failed — Mirroring frame was blank"
+    except Exception as error:
+        return False, f"4. Capture test: Failed — {error}"
+    return True, f"4. Capture test: Successful ({width} × {height})"
+
+
 def show_permission_setup(
     parent: Any = None,
     on_validation: Callable[[bool], None] | None = None,
 ) -> None:
     """Show a guided checklist for the exact packaged app requesting access."""
     import tkinter as tk
-    from tkinter import ttk
+    from tkinter import messagebox, ttk
 
     owns_root = parent is None
     root = parent
@@ -309,8 +385,8 @@ def show_permission_setup(
         root.withdraw()
     dialog = tk.Toplevel(root)
     dialog.title("Bot Player — Mac setup")
-    dialog.geometry("700x440")
-    dialog.minsize(600, 400)
+    dialog.geometry("720x510")
+    dialog.minsize(620, 460)
     dialog.transient(root)
 
     ttk.Label(
@@ -328,8 +404,8 @@ def show_permission_setup(
         dialog,
         text=(
             "These permissions are separate. Approve the app shown above, not a Python "
-            "interpreter. If you deliberately install a newer beta, macOS may ask again "
-            "because the installed app changed."
+            "interpreter. If System Settings says allowed but the checks remain denied, "
+            "use Stale-permission cleanup."
         ),
         justify=tk.LEFT,
         wraplength=590,
@@ -341,40 +417,67 @@ def show_permission_setup(
     accessibility_status = tk.StringVar()
     mirroring_status = tk.StringVar()
     identity_status = tk.StringVar()
+    signature_status = tk.StringVar()
+    capture_status = tk.StringVar()
     validation_status = tk.StringVar()
 
     def refresh() -> bool:
         screen_permission = screen_capture_permission()
         accessibility = accessibility_permission()
         identity_ready = packaged_app_identity_ready()
+        signature_ready, signature_text = code_signature_status()
+        target = locate_iphone_mirroring_window()
+        capture_ready, capture_text = mirroring_capture_test(target, screen_permission)
         identity_status.set(permission_identity_status_text())
+        signature_status.set(signature_text)
         screen_status.set(f"1. Screen Recording: {permission_status_text(screen_permission)}")
         accessibility_status.set(f"2. Accessibility: {permission_status_text(accessibility)}")
         mirroring_status.set(
             "3. iPhone Mirroring: Ready"
-            if locate_iphone_mirroring_window()
+            if target
             else "3. iPhone Mirroring: Open it and keep the phone window visible"
         )
-        return identity_ready and screen_permission is True and accessibility is True
+        capture_status.set(capture_text)
+        return (
+            identity_ready
+            and signature_ready
+            and screen_permission is True
+            and accessibility is True
+            and capture_ready is True
+        )
 
     def check_again() -> None:
         validated = refresh()
         if validated:
             validation_status.set(
-                f"Validated: Screen Recording and Accessibility are granted to {canonical_app_path()}."
+                "Validated: the signed installed app has both permissions and captured iPhone Mirroring."
             )
         else:
             validation_status.set(
-                "Not validated: approve both permissions for the verified app above, "
-                "then click Check again."
+                "Not validated: resolve the first status that is not ready, then click Check again."
             )
         if on_validation:
             on_validation(validated)
 
+    def show_stale_permission_cleanup() -> None:
+        messagebox.showinfo(
+            "Reset old Bot Player permissions",
+            "If macOS shows Bot Player as allowed but this checklist still reports denied:\n\n"
+            "1. Quit Bot Player.\n"
+            "2. Open Terminal and run:\n\n"
+            f"tccutil reset ScreenCapture {APP_BUNDLE_IDENTIFIER}\n"
+            f"tccutil reset Accessibility {APP_BUNDLE_IDENTIFIER}\n\n"
+            "3. Reopen ~/Applications/Bot Player.app and approve both prompts again.\n\n"
+            "These commands remove only Bot Player's previous macOS privacy decisions.",
+            parent=dialog,
+        )
+
     ttk.Label(status_frame, textvariable=identity_status).pack(anchor=tk.W, pady=2)
+    ttk.Label(status_frame, textvariable=signature_status, justify=tk.LEFT, wraplength=650).pack(anchor=tk.W, pady=2)
     ttk.Label(status_frame, textvariable=screen_status).pack(anchor=tk.W, pady=2)
     ttk.Label(status_frame, textvariable=accessibility_status).pack(anchor=tk.W, pady=2)
     ttk.Label(status_frame, textvariable=mirroring_status).pack(anchor=tk.W, pady=2)
+    ttk.Label(status_frame, textvariable=capture_status).pack(anchor=tk.W, pady=2)
     ttk.Label(status_frame, textvariable=validation_status, wraplength=640).pack(anchor=tk.W, pady=(8, 2))
 
     actions = ttk.Frame(dialog)
@@ -390,6 +493,7 @@ def show_permission_setup(
 
     ttk.Button(actions, text="Open Screen Recording", command=open_screen).pack(side=tk.LEFT)
     ttk.Button(actions, text="Open Accessibility", command=open_accessibility).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Stale-permission cleanup", command=show_stale_permission_cleanup).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Check again", command=check_again).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Done", command=dialog.destroy).pack(side=tk.RIGHT)
     refresh()
@@ -442,11 +546,6 @@ def mirroring_capture_block_reason(target: MirroringWindow | None) -> str | None
     current = window_is_unchanged(target)
     if not current:
         return "The authenticated iPhone Mirroring window moved or disappeared. Leave it still and try again."
-    occluding_window = occluding_window_name(current)
-    if occluding_window:
-        return (
-            f"{occluding_window} is above the iPhone Mirroring region. Move or minimize it before capturing."
-        )
     return None
 
 
@@ -535,7 +634,36 @@ def active_unobscured_window(target: MirroringWindow) -> MirroringWindow | None:
     return current if current and window_is_unobscured(current) else None
 
 
+def active_capture_window(target: MirroringWindow) -> MirroringWindow | None:
+    """Allow observation of the identified window even when another app overlaps its screen region."""
+    return window_is_unchanged(target)
+
+
 def screenshot(target: MirroringWindow) -> Image.Image:
+    """Capture the authenticated Mirroring window itself, not a screen rectangle."""
+    if sys.platform == "darwin":
+        with tempfile.NamedTemporaryFile(suffix=".png") as capture_file:
+            result = subprocess.run(
+                [
+                    "/usr/sbin/screencapture",
+                    "-x",
+                    "-l",
+                    str(target.window_id),
+                    "-o",
+                    capture_file.name,
+                ],
+                text=False,
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.decode("utf-8", errors="replace").strip()
+                raise RuntimeError(detail or "macOS screencapture did not return a frame")
+            try:
+                with Image.open(capture_file.name) as frame:
+                    return frame.convert("RGB").copy()
+            except Exception as error:
+                raise RuntimeError(f"macOS returned an unreadable Mirroring frame: {error}") from error
     rect = target.rect
     return pyautogui.screenshot(region=(rect.x, rect.y, rect.width, rect.height)).convert("RGB")
 
@@ -821,7 +949,7 @@ def record_live_session(args: argparse.Namespace) -> int:
                 time.sleep(RECORDING_INTERVAL_SECONDS)
                 continue
 
-            current = active_unobscured_window(target)
+            current = active_capture_window(target)
             if not current:
                 time.sleep(RECORDING_INTERVAL_SECONDS)
                 continue
@@ -2433,12 +2561,12 @@ def capture_icon(args: argparse.Namespace, replacement_confirmed: bool = False) 
                 emit("ready", "Game icon replacement was cancelled. Nothing was saved.")
                 return 0
     target = locate_iphone_mirroring_window()
-    target = active_unobscured_window(target) if target else None
+    target = active_capture_window(target) if target else None
     if not target:
         emit(
             "stopped",
             mirroring_capture_block_reason(locate_iphone_mirroring_window())
-            or "Keep iPhone Mirroring visible and unobscured before capturing the game icon template.",
+            or "Keep iPhone Mirroring visible and still before capturing the game icon template.",
         )
         return 1
     try:
@@ -2477,7 +2605,7 @@ def capture_board_template(role: str, game: str, label: str | None = None, paren
         emit("ready", "No template name was entered. Nothing was saved.")
         return None
     target = locate_iphone_mirroring_window()
-    target = active_unobscured_window(target) if target else None
+    target = active_capture_window(target) if target else None
     if not target:
         emit(
             "waiting",

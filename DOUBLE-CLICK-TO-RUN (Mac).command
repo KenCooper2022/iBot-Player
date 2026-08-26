@@ -22,7 +22,7 @@ fi
 
 APP_PATH="$HOME/Applications/Bot Player.app"
 APP_EXECUTABLE="$APP_PATH/Contents/MacOS/Bot Player"
-BUILD_REVISION="2026-08-25-signed-quartz-input"
+BUILD_REVISION="2026-08-25-window-capture-tcc-repair"
 APP_REVISION_FILE="$APP_PATH/Contents/Resources/bot-player-build-revision.txt"
 STAGED_APP_PATH="$SCRIPT_DIR/dist/Bot Player.app"
 STAGED_APP_EXECUTABLE="$STAGED_APP_PATH/Contents/MacOS/Bot Player"
@@ -42,19 +42,19 @@ fi
 
 if [[ "$REBUILD_REQUESTED" != true && -x "$APP_EXECUTABLE" ]]; then
   if [[ ! -f "$APP_REVISION_FILE" || "$(cat "$APP_REVISION_FILE" 2>/dev/null)" != "$BUILD_REVISION" ]]; then
-    echo "  A newer Bot Player package is available, but the approved app will not be replaced automatically."
-    echo "  To install it deliberately, double-click Build Bot Player.command."
-    echo "  Replacing the app can require Screen Recording and Accessibility approval again."
+    echo "  The installed Bot Player.app is older than this package."
+    echo "  Replacing it now ensures permissions are checked against the newest signed app."
+    echo "  This can require Screen Recording and Accessibility approval again."
   else
     echo "  Opening the existing approved Bot Player.app..."
+    open "$APP_PATH"
+    exit 0
   fi
-  open "$APP_PATH"
-  exit 0
 fi
 
-if [[ "$REBUILD_REQUESTED" == true && -x "$APP_EXECUTABLE" ]]; then
+if [[ -x "$APP_EXECUTABLE" ]]; then
   echo "  Rebuilding will replace $APP_PATH."
-  echo "  The new build must be signed with a certificate in this Mac's keychain."
+  echo "  The new local build must be signed with an Apple Development certificate in this Mac's keychain."
 else
   echo "  Bot Player.app is not installed yet. Building it once for $APP_PATH..."
 fi
@@ -177,7 +177,7 @@ if [[ ! -x "$STAGED_APP_EXECUTABLE" ]]; then
 fi
 mkdir -p "$(dirname "$STAGED_REVISION_FILE")"
 printf '%s\n' "$BUILD_REVISION" > "$STAGED_REVISION_FILE"
-bash "$SCRIPT_DIR/sign-macos-app.sh" "$STAGED_APP_PATH" || {
+bash "$SCRIPT_DIR/sign-macos-app.sh" "$STAGED_APP_PATH" development || {
   echo "  [ERROR] Bot Player.app was not signed. The installed app was left unchanged."
   read -r -p "  Press Return to close..." _
   exit 1

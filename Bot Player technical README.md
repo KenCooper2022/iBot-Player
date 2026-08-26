@@ -127,19 +127,33 @@ For the easiest test, double-click `DOUBLE-CLICK-TO-RUN (Mac).command`.
 Following the same pattern as the Audio Stream Miner launcher, it finds Python,
 creates a private `.bot-player-venv`, installs the required packages, builds a
 real `Bot Player.app`, installs it in `~/Applications`, and opens that app. The
-first build may take a few minutes; later launches open the same installed app
-directly and intentionally ignore changed source-file timestamps. Because the
-beta is not notarized, the first launch may require Control-click → **Open**.
+first build may take a few minutes. Later launches reuse the installed app when
+its build revision matches; when the package has a newer revision, the launcher
+rebuilds and replaces the same canonical app path so macOS checks the current
+signed bundle. Because the beta is not notarized, the first launch may require
+Control-click → **Open**.
 
 The packaged app is important for macOS privacy permissions: enable
 **Bot Player.app** in Screen Recording and Accessibility. The app's **Mac setup
 & permissions** checklist identifies the exact installed app and opens the two
-separate privacy panes one at a time.
+separate privacy panes one at a time. Its **Check again** action also displays
+the Apple signing authority and Team ID for the running app, then performs a
+one-frame iPhone Mirroring capture test. This makes it clear whether a failure
+comes from signing identity, TCC authorization, Mirroring visibility, or the
+actual capture call.
 
-To deliberately install a changed beta, use `Build Bot Player.command` and
-type `REBUILD` at its confirmation prompt. Replacing the app can make macOS
-request Screen Recording and Accessibility approval again; normal launches
-never replace the approved app automatically.
+To deliberately force a replacement, use `Build Bot Player.command` and type
+`REBUILD` at its confirmation prompt. A normal double-click also replaces the
+canonical app automatically when its packaged revision is newer. Any
+replacement can make macOS request Screen Recording and Accessibility approval
+again.
+
+If the macOS privacy page shows **Bot Player** as allowed but the checklist
+still reports a denial, use the **Stale-permission cleanup** button in the
+checklist. It shows two `tccutil reset` commands scoped to Bot Player's bundle
+identifier; quit the app, run both commands, then reopen the canonical app and
+approve its fresh prompts. This removes only Bot Player's prior permission
+decisions.
 
 After both permissions are approved, use **Test iPhone connection** for a
 limited end-to-end input check. Put any app in the upper-left Home Screen app
@@ -166,11 +180,13 @@ PyInstaller and the Python packages are downloaded when the maintainer builds
 a release; end users receive the finished app and do not need Python, pip,
 Node, or a terminal.
 
-The builder requires a **Developer ID Application** certificate (preferred for
-distribution) or an **Apple Development** certificate (local testing) in the
-Mac's keychain. It refuses to create an unsigned or ad-hoc-signed app. Set
-`BOT_PLAYER_SIGNING_IDENTITY` to choose a specific installed certificate.
-Notarize the signed DMG with Apple before distributing it outside your team.
+The normal double-click launcher performs a **development** build and requires
+an **Apple Development** certificate in the Mac's keychain. The standalone
+DMG builder performs a **distribution** build and requires a **Developer ID
+Application** certificate. Neither path creates an unsigned or ad-hoc-signed
+app. Set `BOT_PLAYER_SIGNING_IDENTITY` to choose a specific installed
+certificate of the required type. Notarize the signed DMG with Apple before
+distributing it outside your team.
 
 The previous `desktop/macos/build-macos.sh` path remains as a compatibility
 launcher and forwards to this Python build.

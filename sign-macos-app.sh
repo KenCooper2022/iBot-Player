@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_PATH="${1:?Usage: sign-macos-app.sh '/path/to/Bot Player.app'}"
+APP_PATH="${1:?Usage: sign-macos-app.sh '/path/to/Bot Player.app' [development|distribution]}"
+BUILD_MODE="${2:-development}"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "Bot Player signing can only run on macOS." >&2
@@ -16,9 +17,22 @@ fi
 IDENTITY_LIST="$(security find-identity -v -p codesigning 2>/dev/null || true)"
 SIGNING_IDENTITY="${BOT_PLAYER_SIGNING_IDENTITY:-}"
 
-identity_is_supported() {
+case "$BUILD_MODE" in
+  development)
+    IDENTITY_PREFIX="Apple Development: "
+    ;;
+  distribution)
+    IDENTITY_PREFIX="Developer ID Application: "
+    ;;
+  *)
+    echo "Signing mode must be development or distribution." >&2
+    exit 1
+    ;;
+esac
+
+identity_matches_mode() {
   case "$1" in
-    "Developer ID Application: "*|"Apple Development: "*)
+    "$IDENTITY_PREFIX"*)
       return 0
       ;;
     *)
@@ -32,34 +46,24 @@ if [[ -n "$SIGNING_IDENTITY" ]]; then
     echo "BOT_PLAYER_SIGNING_IDENTITY is not available in this Mac's keychain: $SIGNING_IDENTITY" >&2
     exit 1
   fi
-  if ! identity_is_supported "$SIGNING_IDENTITY"; then
-    echo "BOT_PLAYER_SIGNING_IDENTITY must be a Developer ID Application or Apple Development certificate." >&2
+  if ! identity_matches_mode "$SIGNING_IDENTITY"; then
+    echo "BOT_PLAYER_SIGNING_IDENTITY must be an identity beginning with $IDENTITY_PREFIX for $BUILD_MODE builds." >&2
     exit 1
   fi
 else
   SIGNING_IDENTITY="$(
-    awk -F'"' '
-      /"Developer ID Application: / { print $2; found = 1; exit }
-      /"Apple Development: / && development == "" { development = $2 }
-      END { if (!found && development != "") print development }
-    ' <<<"$IDENTITY_LIST"
+    awk -F'"' -v identity_prefix="$IDENTITY_PREFIX" '$2 ~ "^" identity_prefix { print $2; exit }' <<<"$IDENTITY_LIST"
   )"
 fi
 
 if [[ -z "$SIGNING_IDENTITY" ]]; then
-  cat >&2 <<'EOF'
-No usable signing certificate was found.
-
-Install a "Developer ID Application" certificate for a distributable build, or
-an "Apple Development" certificate for local testing. You can select an
-installed certificate explicitly with BOT_PLAYER_SIGNING_IDENTITY.
-
-Bot Player refuses to produce an unsigned or ad-hoc-signed app bundle.
-EOF
+  echo "No usable $IDENTITY_PREFIX certificate was found for this $BUILD_MODE build." >&2
+  echo "Set BOT_PLAYER_SIGNING_IDENTITY to choose an installed matching certificate." >&2
+  echo "Bot Player refuses to produce an unsigned or ad-hoc-signed app bundle." >&2
   exit 1
 fi
-if ! identity_is_supported "$SIGNING_IDENTITY"; then
-  echo "Only Developer ID Application and Apple Development certificates may sign Bot Player." >&2
+if ! identity_matches_mode "$SIGNING_IDENTITY"; then
+  echo "Only $IDENTITY_PREFIX certificates may sign this $BUILD_MODE build." >&2
   exit 1
 fi
 

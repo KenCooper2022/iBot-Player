@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST_DIR="$SCRIPT_DIR/dist"
-BUILD_REVISION="2026-08-25-signed-quartz-input"
+BUILD_REVISION="2026-08-25-window-capture-tcc-repair"
 
 if [[ ! -f "$SCRIPT_DIR/block-jam-3d-icon.png" ]]; then
   echo "The bundled Block Jam 3D icon is missing from this package." >&2
@@ -31,7 +31,7 @@ if [[ ! -x "$APP_EXECUTABLE" ]]; then
 fi
 mkdir -p "$APP_PATH/Contents/Resources"
 printf '%s\n' "$BUILD_REVISION" > "$APP_PATH/Contents/Resources/bot-player-build-revision.txt"
-bash "$SCRIPT_DIR/sign-macos-app.sh" "$APP_PATH"
+bash "$SCRIPT_DIR/sign-macos-app.sh" "$APP_PATH" distribution
 
 DMG_ROOT="$DIST_DIR/dmg-root"
 rm -rf "$DMG_ROOT"
