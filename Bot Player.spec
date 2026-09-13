@@ -2,10 +2,10 @@
 
 
 a = Analysis(
-    ['/Users/kencooper/Downloads/relay-cockpit-beta 16/bot_player.py'],
+    ['/Users/kencooper/Desktop/iBot-Player/bot_player.py'],
     pathex=[],
     binaries=[],
-    datas=[('/Users/kencooper/Downloads/relay-cockpit-beta 16/block-jam-3d-icon.png', '.')],
+    datas=[('/Users/kencooper/Desktop/iBot-Player/block-jam-3d-icon.png', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

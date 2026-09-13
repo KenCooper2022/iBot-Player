@@ -3,4 +3,5 @@ opencv-python>=4.10.0
 PyAutoGUI>=0.9.54
 pyobjc-framework-Quartz>=10.3
 pyobjc-framework-Cocoa>=10.3
+pyobjc-framework-ApplicationServices>=10.3
 pyinstaller>=6.11

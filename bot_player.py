@@ -25,14 +25,16 @@ import time
 import uuid
 import warnings
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Protocol
 
 try:
     import pyautogui
     from AppKit import NSRunningApplication
     from PIL import Image, ImageChops, ImageOps, ImageStat, ImageTk
+    import ApplicationServices
     import Quartz
 except ImportError as error:
     print(
@@ -51,7 +53,9 @@ except ImportError as error:
 MATCH_THRESHOLD = 0.86
 STABLE_READINGS = 2
 POLL_SECONDS = 0.55
-MAX_ACTIONS = 50
+RECOVERY_PAUSE_SECONDS = 2.0
+NO_ACTION_GRACE_SECONDS = 15.0
+MAX_HOLD_SECONDS = 3.0
 IPHONE_MIRRORING_BUNDLE_IDENTIFIERS = {"com.apple.ScreenContinuity"}
 DEFAULT_GAME_NAME = "Block Jam 3D"
 CALIBRATION_FORMAT = "bot-player-calibration"
@@ -61,9 +65,13 @@ MAX_CALIBRATION_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_CALIBRATION_BACKUP_BYTES = 32 * 1024 * 1024
 MAX_CALIBRATION_IMAGE_PIXELS = 4_000_000
 RECORDING_FORMAT = "bot-player-recording"
-RECORDING_VERSION = 1
+RECORDING_VERSION = 2
 RECORDING_INTERVAL_SECONDS = 0.25
 MAX_RECORDING_FRAMES = 12_000
+MAX_RECORDING_ACTIONS = 20_000
+TAP_MAX_DISTANCE = 0.015
+TAP_MAX_DURATION = 0.35
+HOLD_MIN_DURATION = 0.45
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
 MIN_TRAINING_FRAMES = 8
 MIN_TRAINING_DURATION_SECONDS = 1.5
@@ -72,6 +80,14 @@ MAX_TRAINING_CANDIDATES = 12
 TRAINING_MATCH_THRESHOLD = 0.91
 TRAINING_TARGET_REGION = (0.0, 0.0, 1.0, 0.30)
 TRAINING_PILE_REGION = (0.02, 0.24, 0.96, 0.72)
+TRAINED_POLICY_FORMAT = "bot-player-trained-policy"
+TRAINED_POLICY_VERSION = 1
+MAX_TRAINING_EXAMPLES = 6000
+MAX_FRAME_ACTION_GAP_SECONDS = 3 * RECORDING_INTERVAL_SECONDS
+NN_POLICY_MATCH_THRESHOLD = 0.90
+NN_PREFILTER_SIZE = 16
+NN_FEATURE_SIZE = 32
+NN_PREFILTER_SHORTLIST = 50
 STOP_REQUESTED = threading.Event()
 START_REQUESTED = threading.Event()
 RECORDING_STOP_REQUESTED = threading.Event()
@@ -127,6 +143,80 @@ class Template:
     image: Image.Image
 
 
+class ActionKind(str, Enum):
+    TAP = "tap"
+    SWIPE = "swipe"
+    DRAG = "drag"
+    HOLD = "hold"
+
+
+@dataclass(frozen=True)
+class Action:
+    """One proposed input, in the same normalized window coordinates as Match."""
+
+    label: str
+    kind: ActionKind
+    points: tuple[tuple[float, float], ...]
+    hold_seconds: float
+    confidence: float
+
+    @property
+    def x(self) -> float:
+        return self.points[0][0]
+
+    @property
+    def y(self) -> float:
+        return self.points[0][1]
+
+    @classmethod
+    def from_tap_match(cls, match: Match) -> "Action":
+        return cls(
+            label=match.label,
+            kind=ActionKind.TAP,
+            points=((match.x, match.y),),
+            hold_seconds=0.0,
+            confidence=match.confidence,
+        )
+
+
+class Policy(Protocol):
+    """Something that can watch frames and propose a guarded action to take.
+
+    BlockJamClassifier-style template matching and a trained model both
+    implement this so BotPlayer can drive either without knowing which one
+    it has.
+    """
+
+    name: str
+
+    @property
+    def ready(self) -> bool: ...
+
+    def propose_action(self, frame: Image.Image) -> Action | None: ...
+
+
+class TemplateMatchPolicy:
+    """Adapts BlockJamClassifier's target/pile matching to the Policy interface."""
+
+    name = "template_match"
+
+    def __init__(self, classifier: "BlockJamClassifier") -> None:
+        self.classifier = classifier
+
+    @property
+    def ready(self) -> bool:
+        return self.classifier.ready
+
+    def propose_action(self, frame: Image.Image) -> Action | None:
+        match = self.classifier.next_confirmed_action(frame)
+        return Action.from_tap_match(match) if match else None
+
+
+def load_trained_policy(game: str) -> Policy | None:
+    """Load this game's trained nearest-neighbor policy, if one has been trained. Defined below."""
+    return _load_trained_policy_impl(game)
+
+
 @dataclass
 class TrainingFrame:
     """A local frame eligible for conservative training analysis."""
@@ -138,6 +228,18 @@ class TrainingFrame:
 
 class TrainingSourceError(ValueError):
     """A local recording or clip cannot produce safe training examples."""
+
+
+@dataclass
+class TrainingExample:
+    """One (frame, human action) pair aligned from a recording, ready to save into a trained policy."""
+
+    id: str
+    action: Action
+    prefilter: bytes
+    features: bytes
+    source_recording: str
+    source_frame_index: int
 
 
 def emit(state: str, message: str, **details: Any) -> None:
@@ -211,6 +313,7 @@ def open_mac_permissions(permission: str = "screen") -> None:
     urls = {
         "screen": "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
         "accessibility": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+        "input_monitoring": "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
     }
     url = urls.get(permission, urls["screen"])
     try:
@@ -228,7 +331,9 @@ def launch_iphone_mirroring() -> None:
 
 
 def accessibility_permission() -> bool | None:
-    checker = getattr(Quartz, "AXIsProcessTrusted", None)
+    # AXIsProcessTrusted lives in ApplicationServices, not Quartz -- fall back
+    # to Quartz only for older pyobjc versions that re-exported it there.
+    checker = getattr(ApplicationServices, "AXIsProcessTrusted", None) or getattr(Quartz, "AXIsProcessTrusted", None)
     if not callable(checker):
         return None
     try:
@@ -248,14 +353,42 @@ def request_screen_capture_permission() -> bool | None:
 
 
 def request_accessibility_permission() -> bool | None:
-    requester = getattr(Quartz, "AXIsProcessTrustedWithOptions", None)
+    requester = getattr(ApplicationServices, "AXIsProcessTrustedWithOptions", None) or getattr(
+        Quartz, "AXIsProcessTrustedWithOptions", None
+    )
     if callable(requester):
-        prompt_key = getattr(Quartz, "kAXTrustedCheckOptionPrompt", "AXTrustedCheckOptionPrompt")
+        prompt_key = getattr(ApplicationServices, "kAXTrustedCheckOptionPrompt", None) or getattr(
+            Quartz, "kAXTrustedCheckOptionPrompt", "AXTrustedCheckOptionPrompt"
+        )
         try:
             return bool(requester({prompt_key: True}))
         except Exception:
             pass
     return accessibility_permission()
+
+
+def input_monitoring_available() -> bool | None:
+    """Best-effort check by attempting to create a listen-only event tap.
+
+    There is no public preflight API for the Input Monitoring TCC service,
+    so this is only used to inform the status display -- ActionRecorder
+    always re-checks for itself when a recording actually starts, and
+    recording degrades gracefully (frames only) either way.
+    """
+    if not callable(getattr(Quartz, "CGEventTapCreate", None)):
+        return None
+    try:
+        tap = Quartz.CGEventTapCreate(
+            Quartz.kCGHIDEventTap,
+            Quartz.kCGHeadInsertEventTap,
+            Quartz.kCGEventTapOptionListenOnly,
+            Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseDown),
+            lambda proxy, event_type, event, refcon: event,
+            None,
+        )
+        return tap is not None
+    except Exception:
+        return None
 
 
 def permission_status_text(value: bool | None) -> str:
@@ -419,6 +552,7 @@ def show_permission_setup(
     identity_status = tk.StringVar()
     signature_status = tk.StringVar()
     capture_status = tk.StringVar()
+    input_monitoring_status = tk.StringVar()
     validation_status = tk.StringVar()
 
     def refresh() -> bool:
@@ -438,6 +572,10 @@ def show_permission_setup(
             else "3. iPhone Mirroring: Open it and keep the phone window visible"
         )
         capture_status.set(capture_text)
+        input_monitoring_status.set(
+            "Input Monitoring (optional, for recording your taps to train a bot): "
+            + permission_status_text(input_monitoring_available())
+        )
         return (
             identity_ready
             and signature_ready
@@ -478,6 +616,7 @@ def show_permission_setup(
     ttk.Label(status_frame, textvariable=accessibility_status).pack(anchor=tk.W, pady=2)
     ttk.Label(status_frame, textvariable=mirroring_status).pack(anchor=tk.W, pady=2)
     ttk.Label(status_frame, textvariable=capture_status).pack(anchor=tk.W, pady=2)
+    ttk.Label(status_frame, textvariable=input_monitoring_status, wraplength=650).pack(anchor=tk.W, pady=(8, 2))
     ttk.Label(status_frame, textvariable=validation_status, wraplength=640).pack(anchor=tk.W, pady=(8, 2))
 
     actions = ttk.Frame(dialog)
@@ -491,8 +630,12 @@ def show_permission_setup(
         request_accessibility_permission()
         open_mac_permissions("accessibility")
 
+    def open_input_monitoring() -> None:
+        open_mac_permissions("input_monitoring")
+
     ttk.Button(actions, text="Open Screen Recording", command=open_screen).pack(side=tk.LEFT)
     ttk.Button(actions, text="Open Accessibility", command=open_accessibility).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Open Input Monitoring", command=open_input_monitoring).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Stale-permission cleanup", command=show_stale_permission_cleanup).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Check again", command=check_again).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Done", command=dialog.destroy).pack(side=tk.RIGHT)
@@ -559,6 +702,11 @@ def game_directory(game: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
+def trained_policy_directory(game: str) -> Path:
+    directory = application_support() / "BotPlayer" / "models" / game_key(game)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
 
 def locate_iphone_mirroring_window() -> MirroringWindow | None:
     options = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
@@ -606,8 +754,45 @@ def rects_intersect(left: Rect, right: Rect) -> bool:
     )
 
 
-def occluding_window_name(target: MirroringWindow) -> str | None:
-    """Return a visible window macOS reports above the Mirroring window, if any."""
+SYSTEM_UI_GHOST_WINDOW_OWNERS = {
+    "Dock",
+    "Notification Center",
+    "Control Center",
+    "Spotlight",
+    "SystemUIServer",
+    "WindowManager",
+}
+
+
+def _is_system_ui_screen_wide_ghost_window(owner: str, bounds: dict[str, Any]) -> bool:
+    """Detect an invisible, screen-sized backing/hit-detection window from macOS system UI.
+
+    The Dock (its Mission Control hot-corner catcher, especially with
+    auto-hide on) and Notification Center (its widget backing surface, kept
+    ready even while closed) both report a window with fully opaque alpha
+    and bounds matching the entire main display, even though nothing is
+    actually drawn there. Without this exclusion, any such window would
+    falsely intersect every window on screen, everywhere, always. Scoped to
+    known system-UI process names only, so a genuinely full-screen app is
+    never silently excluded from real occlusion protection.
+    """
+    if owner not in SYSTEM_UI_GHOST_WINDOW_OWNERS:
+        return False
+    try:
+        display_bounds = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
+    except Exception:
+        return False
+    tolerance = 2.0
+    return (
+        abs(float(bounds.get("X", -999)) - display_bounds.origin.x) <= tolerance
+        and abs(float(bounds.get("Y", -999)) - display_bounds.origin.y) <= tolerance
+        and abs(float(bounds.get("Width", -999)) - display_bounds.size.width) <= tolerance
+        and abs(float(bounds.get("Height", -999)) - display_bounds.size.height) <= tolerance
+    )
+
+
+def _window_intersecting_region(target: MirroringWindow, region: Rect) -> str | None:
+    """Return a visible window macOS reports above the Mirroring window that overlaps region, if any."""
     options = Quartz.kCGWindowListOptionOnScreenAboveWindow | Quartz.kCGWindowListExcludeDesktopElements
     windows = Quartz.CGWindowListCopyWindowInfo(options, target.window_id) or []
     for window in windows:
@@ -617,21 +802,41 @@ def occluding_window_name(target: MirroringWindow) -> str | None:
         bounds = window.get(Quartz.kCGWindowBounds)
         if not bounds or float(window.get(Quartz.kCGWindowAlpha, 1)) <= 0.01:
             continue
-        if rects_intersect(target.rect, Rect.from_window(bounds)):
-            owner = str(window.get(Quartz.kCGWindowOwnerName, "")).strip()
+        owner = str(window.get(Quartz.kCGWindowOwnerName, "")).strip()
+        if _is_system_ui_screen_wide_ghost_window(owner, bounds):
+            continue
+        if rects_intersect(region, Rect.from_window(bounds)):
             title = str(window.get(Quartz.kCGWindowName, "")).strip()
             return " — ".join(part for part in (owner, title) if part) or "an unnamed macOS window"
     return None
 
 
-def window_is_unobscured(target: MirroringWindow) -> bool:
-    """Require the authenticated Mirroring window to have no visible foreground overlap."""
-    return occluding_window_name(target) is None
+def point_occluding_window_name(target: MirroringWindow, point: tuple[float, float], margin: float = 6.0) -> str | None:
+    """Return a visible window macOS reports above the Mirroring window, at one normalized point (+/- margin px).
+
+    Used right before actually sending native input: a native click lands at
+    an absolute screen coordinate regardless of which window's content was
+    captured, so what matters for click-through safety is whether anything
+    else is on top of that exact spot -- not whether some other window
+    happens to overlap a totally different part of the phone's screen area.
+    """
+    rect = target.rect
+    x = rect.x + point[0] * rect.width
+    y = rect.y + point[1] * rect.height
+    half = max(1.0, margin)
+    region = Rect(x=int(x - half), y=int(y - half), width=int(half * 2), height=int(half * 2))
+    return _window_intersecting_region(target, region)
 
 
-def active_unobscured_window(target: MirroringWindow) -> MirroringWindow | None:
+def active_window_for_points(target: MirroringWindow, points: Iterable[tuple[float, float]]) -> MirroringWindow | None:
+    """Require only the area right around each given point to be free of visible foreground overlap."""
     current = window_is_unchanged(target)
-    return current if current and window_is_unobscured(current) else None
+    if not current:
+        return None
+    for point in points:
+        if point_occluding_window_name(current, point) is not None:
+            return None
+    return current
 
 
 def active_capture_window(target: MirroringWindow) -> MirroringWindow | None:
@@ -695,6 +900,60 @@ def native_tap(x: float, y: float) -> bool:
     return post_native_mouse_event(up, x, y)
 
 
+def _move_native_path(
+    target: MirroringWindow,
+    points: list[tuple[float, float]],
+    duration: float,
+) -> bool:
+    """Drive one mouseDown -> drag* -> mouseUp path through 2+ normalized points.
+
+    The starting point is committed with a mouseMoved event, then the window
+    is re-checked and every point from there on is recomputed against the
+    freshest rect -- but the already-committed start point is intentionally
+    left as-is, since the cursor has physically already moved there.
+    """
+    current = active_window_for_points(target, [points[0]])
+    if not current or CONNECTION_CHECK_STOP_REQUESTED.is_set():
+        return False
+    rect = current.rect
+    screen_points = [(rect.x + px * rect.width, rect.y + py * rect.height) for px, py in points]
+    moved = getattr(Quartz, "kCGEventMouseMoved", None)
+    down = getattr(Quartz, "kCGEventLeftMouseDown", None)
+    dragged = getattr(Quartz, "kCGEventLeftMouseDragged", None)
+    up = getattr(Quartz, "kCGEventLeftMouseUp", None)
+    if None in (moved, down, dragged, up) or not post_native_mouse_event(moved, *screen_points[0]):
+        return False
+    current = active_window_for_points(target, [points[0]])
+    if not current or CONNECTION_CHECK_STOP_REQUESTED.is_set():
+        return False
+    rect = current.rect
+    screen_points = [screen_points[0]] + [(rect.x + px * rect.width, rect.y + py * rect.height) for px, py in points[1:]]
+    if not post_native_mouse_event(down, *screen_points[0]):
+        return False
+    released = False
+    try:
+        segment_count = len(screen_points) - 1
+        segment_duration = duration / segment_count
+        for index in range(1, len(screen_points)):
+            segment_start = screen_points[index - 1]
+            segment_end = screen_points[index]
+            steps = max(2, min(18, round(segment_duration / 0.04)))
+            for step in range(1, steps + 1):
+                if CONNECTION_CHECK_STOP_REQUESTED.is_set():
+                    return False
+                progress = step / steps
+                x = segment_start[0] + (segment_end[0] - segment_start[0]) * progress
+                y = segment_start[1] + (segment_end[1] - segment_start[1]) * progress
+                if not post_native_mouse_event(dragged, x, y):
+                    return False
+                time.sleep(segment_duration / steps)
+        released = post_native_mouse_event(up, *screen_points[-1])
+        return released
+    finally:
+        if not released:
+            post_native_mouse_event(up, *screen_points[-1])
+
+
 def swipe_mirrored_phone(
     target: MirroringWindow,
     start: tuple[float, float],
@@ -702,50 +961,59 @@ def swipe_mirrored_phone(
     duration: float = 0.55,
 ) -> bool:
     """Send one guarded swipe entirely inside the authenticated Mirroring window."""
-    current = active_unobscured_window(target)
+    return _move_native_path(target, [start, end], duration)
+
+
+def drag_mirrored_phone(
+    target: MirroringWindow,
+    points: list[tuple[float, float]],
+    duration: float = 0.55,
+) -> bool:
+    """Send one guarded multi-point drag entirely inside the authenticated Mirroring window."""
+    if len(points) < 2:
+        return False
+    return _move_native_path(target, points, duration)
+
+
+def hold_mirrored_phone(
+    target: MirroringWindow,
+    point: tuple[float, float],
+    seconds: float,
+) -> bool:
+    """Press and hold at one point, re-checking safety every ~0.05s, capped at MAX_HOLD_SECONDS."""
+    current = active_window_for_points(target, [point])
     if not current or CONNECTION_CHECK_STOP_REQUESTED.is_set():
         return False
     rect = current.rect
-    start_x = rect.x + start[0] * rect.width
-    start_y = rect.y + start[1] * rect.height
-    end_x = rect.x + end[0] * rect.width
-    end_y = rect.y + end[1] * rect.height
+    x = rect.x + point[0] * rect.width
+    y = rect.y + point[1] * rect.height
     moved = getattr(Quartz, "kCGEventMouseMoved", None)
     down = getattr(Quartz, "kCGEventLeftMouseDown", None)
-    dragged = getattr(Quartz, "kCGEventLeftMouseDragged", None)
     up = getattr(Quartz, "kCGEventLeftMouseUp", None)
-    if None in (moved, down, dragged, up) or not post_native_mouse_event(moved, start_x, start_y):
+    if None in (moved, down, up) or not post_native_mouse_event(moved, x, y):
         return False
-    current = active_unobscured_window(target)
-    if not current or CONNECTION_CHECK_STOP_REQUESTED.is_set():
+    if not active_window_for_points(target, [point]) or CONNECTION_CHECK_STOP_REQUESTED.is_set():
         return False
-    rect = current.rect
-    end_x = rect.x + end[0] * rect.width
-    end_y = rect.y + end[1] * rect.height
-    if not post_native_mouse_event(down, start_x, start_y):
+    if not post_native_mouse_event(down, x, y):
         return False
     released = False
     try:
-        steps = max(2, min(18, round(duration / 0.04)))
-        for step in range(1, steps + 1):
-            if CONNECTION_CHECK_STOP_REQUESTED.is_set():
+        clamped_seconds = min(max(0.0, seconds), MAX_HOLD_SECONDS)
+        increments = max(1, round(clamped_seconds / 0.05))
+        for _ in range(increments):
+            if CONNECTION_CHECK_STOP_REQUESTED.is_set() or not active_window_for_points(target, [point]):
                 return False
-            progress = step / steps
-            x = start_x + (end_x - start_x) * progress
-            y = start_y + (end_y - start_y) * progress
-            if not post_native_mouse_event(dragged, x, y):
-                return False
-            time.sleep(duration / steps)
-        released = post_native_mouse_event(up, end_x, end_y)
+            time.sleep(clamped_seconds / increments)
+        released = post_native_mouse_event(up, x, y)
         return released
     finally:
         if not released:
-            post_native_mouse_event(up, end_x, end_y)
+            post_native_mouse_event(up, x, y)
 
 
 def tap_mirrored_phone(target: MirroringWindow, point: tuple[float, float]) -> bool:
     """Move and tap only after a second, immediately-before-input safety check."""
-    current = active_unobscured_window(target)
+    current = active_window_for_points(target, [point])
     if not current or CONNECTION_CHECK_STOP_REQUESTED.is_set():
         return False
     rect = current.rect
@@ -754,7 +1022,7 @@ def tap_mirrored_phone(target: MirroringWindow, point: tuple[float, float]) -> b
     moved = getattr(Quartz, "kCGEventMouseMoved", None)
     if moved is None or not post_native_mouse_event(moved, x, y):
         return False
-    if not active_unobscured_window(target) or CONNECTION_CHECK_STOP_REQUESTED.is_set():
+    if not active_window_for_points(target, [point]) or CONNECTION_CHECK_STOP_REQUESTED.is_set():
         return False
     return native_tap(x, y)
 
@@ -784,11 +1052,11 @@ def _run_connection_check(_args: argparse.Namespace | None = None) -> int:
         return 1
 
     target = locate_iphone_mirroring_window()
-    target = active_unobscured_window(target) if target else None
+    target = active_capture_window(target) if target else None
     if not target:
         emit(
             "stopped",
-            "Connection check needs a visible, unobscured iPhone Mirroring window. "
+            "Connection check needs a visible iPhone Mirroring window. "
             "Open iPhone Mirroring and leave its phone window in view.",
         )
         return 1
@@ -800,13 +1068,13 @@ def _run_connection_check(_args: argparse.Namespace | None = None) -> int:
             emit("stopped", "The Mirroring window changed before the Home Screen swipe. No more input was sent.")
             return 1
         time.sleep(0.7)
-        target = active_unobscured_window(target)
+        target = active_capture_window(target)
         if not target or CONNECTION_CHECK_STOP_REQUESTED.is_set():
             emit("stopped", "The Mirroring window changed after the Home Screen swipe. No more input was sent.")
             return 1
         home_fingerprint = fingerprint(screenshot(target))
         time.sleep(0.25)
-        target = active_unobscured_window(target)
+        target = active_capture_window(target)
         if not target or CONNECTION_CHECK_STOP_REQUESTED.is_set():
             emit("stopped", "The Mirroring window changed while confirming the Home Screen. No more input was sent.")
             return 1
@@ -833,7 +1101,7 @@ def _run_connection_check(_args: argparse.Namespace | None = None) -> int:
         current = target
         for _ in range(8):
             time.sleep(0.4)
-            current = active_unobscured_window(current)
+            current = active_capture_window(current)
             if not current or CONNECTION_CHECK_STOP_REQUESTED.is_set():
                 emit("stopped", "The Mirroring window changed while opening the app. No close gesture was sent.")
                 return 1
@@ -856,7 +1124,7 @@ def _run_connection_check(_args: argparse.Namespace | None = None) -> int:
             emit("stopped", "The Mirroring window changed before the close gesture. No more input was sent.")
             return 1
         time.sleep(0.7)
-        target = active_unobscured_window(target)
+        target = active_capture_window(target)
         if not target or CONNECTION_CHECK_STOP_REQUESTED.is_set():
             emit("stopped", "The Mirroring window changed while returning Home. Check the phone manually.")
             return 1
@@ -907,10 +1175,197 @@ def start_recording_session(game: str) -> tuple[Path, Path]:
     return session_directory, frames_directory
 
 
+def _classify_gesture(points: list[tuple[float, float]], started_at: float, ended_at: float) -> tuple[str, float]:
+    """Classify a mouseDown -> drag* -> mouseUp path into tap/hold/swipe/drag.
+
+    Returns (kind, hold_seconds). Never invents a kind for an empty path --
+    callers must not call this with fewer than one point.
+    """
+    duration = max(0.0, ended_at - started_at)
+    first, last = points[0], points[-1]
+    displacement = math.hypot(last[0] - first[0], last[1] - first[1])
+    if displacement < TAP_MAX_DISTANCE:
+        if duration >= HOLD_MIN_DURATION:
+            return "hold", duration
+        return "tap", 0.0
+    if len(points) <= 2:
+        return "swipe", 0.0
+    return "drag", 0.0
+
+
+class _ObservationGate:
+    """Thread-safe rect shared between the recording loop and the event-tap thread.
+
+    The recording loop sets this to the current window rect only on ticks
+    where a frame was actually captured (i.e. the window is visible and
+    unobscured), and clears it otherwise -- so observed clicks are dropped
+    during exactly the same conditions frame capture already pauses for.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._rect: Rect | None = None
+
+    def set_window(self, rect: Rect | None) -> None:
+        with self._lock:
+            self._rect = rect
+
+    def current_window(self) -> Rect | None:
+        with self._lock:
+            return self._rect
+
+
+class ActionRecorder:
+    """Passively observes the human's own clicks/drags -- never posts input.
+
+    Uses a listen-only Quartz event tap (kCGEventTapOptionListenOnly), which
+    cannot modify or swallow events, only observe them. If Input Monitoring
+    permission is unavailable, `start()` returns False and recording
+    continues exactly as it did before this existed: frames only.
+    """
+
+    def __init__(self) -> None:
+        self.gate = _ObservationGate()
+        self._lock = threading.Lock()
+        self._completed: list[dict[str, Any]] = []
+        self._current_points: list[tuple[float, float]] = []
+        self._current_started_at: float | None = None
+        self._run_loop: Any = None
+        self._thread: threading.Thread | None = None
+        self.available = False
+        self.unavailable_reason: str | None = None
+
+    def start(self) -> bool:
+        if not callable(getattr(Quartz, "CGEventTapCreate", None)):
+            self.unavailable_reason = "Quartz event monitoring is not available in this Python runtime."
+            return False
+        ready = threading.Event()
+        self._thread = threading.Thread(target=self._run_loop_body, args=(ready,), daemon=True)
+        self._thread.start()
+        ready.wait(timeout=2.0)
+        if not self.available and not self.unavailable_reason:
+            self.unavailable_reason = "Input Monitoring permission was not granted."
+        return self.available
+
+    def _run_loop_body(self, ready: threading.Event) -> None:
+        try:
+            mask = 0
+            for name in ("kCGEventLeftMouseDown", "kCGEventLeftMouseDragged", "kCGEventLeftMouseUp"):
+                event_type = getattr(Quartz, name, None)
+                if event_type is None:
+                    self.unavailable_reason = "Quartz event monitoring is not available in this Python runtime."
+                    return
+                mask |= Quartz.CGEventMaskBit(event_type)
+            tap = Quartz.CGEventTapCreate(
+                Quartz.kCGHIDEventTap,
+                Quartz.kCGHeadInsertEventTap,
+                Quartz.kCGEventTapOptionListenOnly,
+                mask,
+                self._handle_event,
+                None,
+            )
+            if tap is None:
+                self.unavailable_reason = "Input Monitoring permission was not granted."
+                return
+            source = Quartz.CFMachPortCreateRunLoopSource(None, tap, 0)
+            run_loop = Quartz.CFRunLoopGetCurrent()
+            Quartz.CFRunLoopAddSource(run_loop, source, Quartz.kCFRunLoopDefaultMode)
+            Quartz.CGEventTapEnable(tap, True)
+            self._run_loop = run_loop
+            self.available = True
+            ready.set()
+            Quartz.CFRunLoopRun()
+        except Exception as error:
+            self.unavailable_reason = f"Input Monitoring could not start: {error}"
+            self.available = False
+        finally:
+            ready.set()
+
+    def stop(self) -> None:
+        if self._run_loop is not None:
+            try:
+                Quartz.CFRunLoopStop(self._run_loop)
+            except Exception:
+                pass
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+    def _handle_event(self, _proxy: Any, event_type: Any, event: Any, _refcon: Any) -> Any:
+        try:
+            self._observe(event_type, event)
+        except Exception:
+            pass
+        return event
+
+    @staticmethod
+    def _normalize(rect: Rect, location: Any) -> tuple[float, float] | None:
+        if rect.width <= 0 or rect.height <= 0:
+            return None
+        relative_x = (location.x - rect.x) / rect.width
+        relative_y = (location.y - rect.y) / rect.height
+        if not (0.0 <= relative_x <= 1.0 and 0.0 <= relative_y <= 1.0):
+            return None
+        return relative_x, relative_y
+
+    def _observe(self, event_type: Any, event: Any) -> None:
+        rect = self.gate.current_window()
+        now = time.monotonic()
+        if rect is None:
+            self._current_points = []
+            self._current_started_at = None
+            return
+        relative = self._normalize(rect, Quartz.CGEventGetLocation(event))
+        if event_type == Quartz.kCGEventLeftMouseDown:
+            if relative is None:
+                return
+            self._current_points = [relative]
+            self._current_started_at = now
+        elif event_type == Quartz.kCGEventLeftMouseDragged:
+            if self._current_started_at is None:
+                return
+            if relative is not None:
+                self._current_points.append(relative)
+        elif event_type == Quartz.kCGEventLeftMouseUp:
+            if self._current_started_at is None:
+                return
+            if relative is not None:
+                self._current_points.append(relative)
+            self._finish_gesture(now)
+
+    def _finish_gesture(self, ended_at: float) -> None:
+        points, started_at = self._current_points, self._current_started_at
+        self._current_points = []
+        self._current_started_at = None
+        if not points or started_at is None:
+            return
+        kind, hold_seconds = _classify_gesture(points, started_at, ended_at)
+        recorded_points = [points[0]] if kind in ("tap", "hold") else points
+        with self._lock:
+            if len(self._completed) >= MAX_RECORDING_ACTIONS:
+                return
+            self._completed.append(
+                {
+                    "id": uuid.uuid4().hex[:12],
+                    "kind": kind,
+                    "points": [[round(x, 4), round(y, 4)] for x, y in recorded_points],
+                    "started_at": started_at,
+                    "ended_at": ended_at,
+                    "hold_seconds": round(hold_seconds, 3),
+                }
+            )
+
+    def drain(self) -> list[dict[str, Any]]:
+        with self._lock:
+            drained, self._completed = self._completed, []
+        return drained
+
+
 def record_live_session(args: argparse.Namespace) -> int:
-    """Observe the real Mirroring window and save a local frame dataset without input."""
+    """Observe the real Mirroring window and save a local (frame, action) dataset without sending input."""
     session_directory, frames_directory = start_recording_session(args.game)
     manifest_path = session_directory / "manifest.json"
+    recorder = ActionRecorder()
+    input_observed = recorder.start()
     manifest: dict[str, Any] = {
         "format": RECORDING_FORMAT,
         "version": RECORDING_VERSION,
@@ -918,12 +1373,20 @@ def record_live_session(args: argparse.Namespace) -> int:
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "capture_interval_seconds": RECORDING_INTERVAL_SECONDS,
         "input_sent": False,
+        "input_observed": input_observed,
+        "input_observed_reason": recorder.unavailable_reason,
         "frames": [],
+        "actions": [],
     }
+    observing_note = (
+        "Bot Player is also recording your taps and swipes so a bot can later learn from them. "
+        if input_observed
+        else "Bot Player could not observe your taps this session (Input Monitoring permission), so only frames were saved. "
+    )
     emit(
         "recording",
         f"Recording started for {args.game}. Move to the game on the mirrored iPhone and play normally. "
-        "Bot Player is observing only and will not tap.",
+        f"{observing_note}Bot Player itself will not tap.",
         recording=str(session_directory),
     )
     last_waiting_message = ""
@@ -933,6 +1396,7 @@ def record_live_session(args: argparse.Namespace) -> int:
         while not RECORDING_STOP_REQUESTED.is_set() and frame_number < MAX_RECORDING_FRAMES:
             target = locate_iphone_mirroring_window()
             if not target:
+                recorder.gate.set_window(None)
                 message = "Recording is waiting for the authenticated iPhone Mirroring window."
                 if message != last_waiting_message:
                     emit("recording-waiting", message, recording=str(session_directory))
@@ -942,6 +1406,7 @@ def record_live_session(args: argparse.Namespace) -> int:
 
             block_reason = mirroring_capture_block_reason(target)
             if block_reason:
+                recorder.gate.set_window(None)
                 message = f"Recording paused safely: {block_reason}"
                 if message != last_waiting_message:
                     emit("recording-waiting", message, recording=str(session_directory))
@@ -951,6 +1416,7 @@ def record_live_session(args: argparse.Namespace) -> int:
 
             current = active_capture_window(target)
             if not current:
+                recorder.gate.set_window(None)
                 time.sleep(RECORDING_INTERVAL_SECONDS)
                 continue
             try:
@@ -958,15 +1424,18 @@ def record_live_session(args: argparse.Namespace) -> int:
                 frame_path = frames_directory / f"frame-{frame_number:06d}.png"
                 frame.save(frame_path, "PNG")
             except Exception as error:
+                recorder.gate.set_window(None)
                 emit("recording-waiting", f"Recording paused while reading the mirrored window: {error}")
                 time.sleep(RECORDING_INTERVAL_SECONDS)
                 continue
 
+            recorder.gate.set_window(current.rect)
             manifest["frames"].append(
                 {
                     "index": frame_number,
                     "path": str(frame_path.relative_to(session_directory)),
                     "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "monotonic": time.monotonic(),
                     "window": {
                         "x": current.rect.x,
                         "y": current.rect.y,
@@ -975,26 +1444,35 @@ def record_live_session(args: argparse.Namespace) -> int:
                     },
                 }
             )
+            manifest["actions"].extend(recorder.drain())
             frame_number += 1
             last_waiting_message = ""
             emit(
                 "recording",
-                f"Recording live. Saved {frame_number} frame{'s' if frame_number != 1 else ''}. "
+                f"Recording live. Saved {frame_number} frame{'s' if frame_number != 1 else ''}"
+                f" and {len(manifest['actions'])} action{'s' if len(manifest['actions']) != 1 else ''}. "
                 "Play the game normally, then choose Stop & Save Recording.",
                 frames=frame_number,
+                actions=len(manifest["actions"]),
                 recording=str(session_directory),
             )
             next_capture_at = max(next_capture_at + RECORDING_INTERVAL_SECONDS, time.monotonic())
             time.sleep(max(0.0, next_capture_at - time.monotonic()))
     finally:
+        recorder.gate.set_window(None)
+        recorder.stop()
+        manifest["actions"].extend(recorder.drain())
         manifest["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         manifest["frame_count"] = frame_number
+        manifest["action_count"] = len(manifest["actions"])
         manifest["stopped_by_frame_limit"] = frame_number >= MAX_RECORDING_FRAMES
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
         emit(
             "recording-saved",
-            f"Saved recording session with {frame_number} frame{'s' if frame_number != 1 else ''} to {session_directory}.",
+            f"Saved recording session with {frame_number} frame{'s' if frame_number != 1 else ''}"
+            f" and {len(manifest['actions'])} action{'s' if len(manifest['actions']) != 1 else ''} to {session_directory}.",
             frames=frame_number,
+            actions=len(manifest["actions"]),
             recording=str(session_directory),
             manifest=str(manifest_path),
         )
@@ -1013,7 +1491,7 @@ def discover_recording_sessions(game: str) -> list[Path]:
             game_data = manifest.get("game", {})
             if (
                 manifest.get("format") == RECORDING_FORMAT
-                and manifest.get("version") == RECORDING_VERSION
+                and manifest.get("version") in (1, RECORDING_VERSION)
                 and isinstance(game_data, dict)
                 and game_key(str(game_data.get("key", game))) == game_key(game)
             ):
@@ -1032,7 +1510,7 @@ def _load_recording_frames(source: Path, game: str) -> tuple[list[TrainingFrame]
         raise TrainingSourceError("The recording manifest is missing or unreadable.") from error
     if not isinstance(manifest, dict):
         raise TrainingSourceError("The recording manifest must be an object.")
-    if manifest.get("format") != RECORDING_FORMAT or manifest.get("version") != RECORDING_VERSION:
+    if manifest.get("format") != RECORDING_FORMAT or manifest.get("version") not in (1, RECORDING_VERSION):
         raise TrainingSourceError("This recording format or version is not supported.")
     game_data = manifest.get("game")
     if not isinstance(game_data, dict) or game_key(str(game_data.get("key", ""))) != game_key(game):
@@ -1067,6 +1545,142 @@ def _load_recording_frames(source: Path, game: str) -> tuple[list[TrainingFrame]
         max(0.0, (len(frames) - 1) * interval),
     )
     return frames, duration
+
+
+_VALID_ACTION_KINDS = {member.value for member in ActionKind}
+
+
+def _load_recording_session_raw(source: Path, game: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read validated raw frame + action entries (v1 or v2) from one local recording manifest.
+
+    Frames without a monotonic timestamp (only possible in a v1 recording,
+    made before actions existed) are dropped here rather than guessed at --
+    build_frame_action_dataset needs a real clock to align actions to frames.
+    """
+    manifest_path = source / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise TrainingSourceError("The recording manifest is missing or unreadable.") from error
+    if not isinstance(manifest, dict):
+        raise TrainingSourceError("The recording manifest must be an object.")
+    if manifest.get("format") != RECORDING_FORMAT or manifest.get("version") not in (1, RECORDING_VERSION):
+        raise TrainingSourceError("This recording format or version is not supported.")
+    game_data = manifest.get("game")
+    if not isinstance(game_data, dict) or game_key(str(game_data.get("key", ""))) != game_key(game):
+        raise TrainingSourceError(f"This recording belongs to a different game, not {game}.")
+
+    source_root = source.resolve()
+    frames: list[dict[str, Any]] = []
+    frame_entries = manifest.get("frames")
+    if isinstance(frame_entries, list):
+        for entry in frame_entries[:MAX_RECORDING_FRAMES]:
+            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                continue
+            monotonic_value = entry.get("monotonic")
+            if not isinstance(monotonic_value, (int, float)):
+                continue
+            frame_path = (source / entry["path"]).resolve()
+            try:
+                frame_path.relative_to(source_root)
+            except ValueError:
+                continue
+            frames.append(
+                {
+                    "index": entry.get("index", len(frames)),
+                    "path": frame_path,
+                    "monotonic": float(monotonic_value),
+                }
+            )
+
+    actions: list[dict[str, Any]] = []
+    raw_actions = manifest.get("actions")
+    if isinstance(raw_actions, list):
+        for entry in raw_actions[:MAX_RECORDING_ACTIONS]:
+            if not isinstance(entry, dict):
+                continue
+            kind = entry.get("kind")
+            points = entry.get("points")
+            started_at = entry.get("started_at")
+            hold_seconds = entry.get("hold_seconds", 0.0)
+            if (
+                kind not in _VALID_ACTION_KINDS
+                or not isinstance(points, list)
+                or not points
+                or not all(
+                    isinstance(point, list)
+                    and len(point) == 2
+                    and all(isinstance(value, (int, float)) for value in point)
+                    for point in points
+                )
+                or not isinstance(started_at, (int, float))
+                or not isinstance(hold_seconds, (int, float))
+            ):
+                continue
+            normalized_points = [(float(x), float(y)) for x, y in points]
+            if not all(0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 for x, y in normalized_points):
+                continue
+            actions.append(
+                {
+                    "kind": ActionKind(kind),
+                    "points": tuple(normalized_points),
+                    "started_at": float(started_at),
+                    "hold_seconds": max(0.0, float(hold_seconds)),
+                }
+            )
+    return frames, actions
+
+
+def build_frame_action_dataset(session_paths: Iterable[Path], game: str) -> list[TrainingExample]:
+    """Align each recorded action to the nearest preceding frame from its own session.
+
+    Drops an action with no preceding frame, or too large a gap to the
+    preceding frame -- this never labels a frame with the outcome of an
+    action that came after it, matching the "drop what's uncertain rather
+    than guess" approach the rest of the training pipeline already uses.
+    """
+    examples: list[TrainingExample] = []
+    for source in session_paths:
+        if len(examples) >= MAX_TRAINING_EXAMPLES:
+            break
+        frames, actions = _load_recording_session_raw(Path(source), game)
+        if not frames:
+            continue
+        frames_sorted = sorted(frames, key=lambda entry: entry["monotonic"])
+        for action in actions:
+            preceding = [frame for frame in frames_sorted if frame["monotonic"] <= action["started_at"]]
+            if not preceding:
+                continue
+            frame_entry = preceding[-1]
+            if action["started_at"] - frame_entry["monotonic"] > MAX_FRAME_ACTION_GAP_SECONDS:
+                continue
+            try:
+                image = Image.open(frame_entry["path"]).convert("RGB")
+                image.load()
+            except (OSError, ValueError):
+                continue
+            if not _frame_is_usable(image):
+                continue
+            if len(examples) >= MAX_TRAINING_EXAMPLES:
+                break
+            example_id = uuid.uuid4().hex[:12]
+            examples.append(
+                TrainingExample(
+                    id=example_id,
+                    action=Action(
+                        label=example_id,
+                        kind=action["kind"],
+                        points=action["points"],
+                        hold_seconds=action["hold_seconds"],
+                        confidence=1.0,
+                    ),
+                    prefilter=frame_prefilter(image),
+                    features=frame_features(image),
+                    source_recording=str(source),
+                    source_frame_index=frame_entry["index"],
+                )
+            )
+    return examples
 
 
 def _video_frame_to_image(frame: Any) -> Image.Image:
@@ -1468,26 +2082,199 @@ def review_training_candidates(parent: Any, review: dict[str, Any]) -> list[dict
     return result
 
 
+def train_bot_from_sessions(parent: Any, game: str) -> int | None:
+    """Show a local session picker, then build a dataset and train a nearest-neighbor policy.
+
+    Nothing is saved until the user confirms. Returns the number of examples
+    trained on, or None if cancelled or no recordings exist yet.
+    """
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    sessions = discover_recording_sessions(game)
+    if not sessions:
+        messagebox.showinfo(
+            "No recordings yet",
+            f"No saved recording sessions were found for {game}. Use Start Recording Session first, "
+            "then play a few minutes of normal gameplay before training.",
+            parent=parent,
+        )
+        return None
+
+    window = tk.Toplevel(parent)
+    window.title("Train Bot")
+    window.geometry("640x480")
+    window.minsize(520, 380)
+
+    ttk.Label(
+        window,
+        text=f"Train a bot for {game} from recorded sessions",
+        font=("Helvetica", 15, "bold"),
+    ).pack(anchor=tk.W, padx=18, pady=(18, 3))
+    ttk.Label(
+        window,
+        text=(
+            "Select which recordings to learn from. Bot Player pairs each of your recorded taps and "
+            "swipes with the frame just before it, then trains a local model from those pairs. "
+            "Nothing is saved until you confirm below."
+        ),
+        wraplength=590,
+    ).pack(anchor=tk.W, padx=18, pady=(0, 12))
+
+    body = ttk.Frame(window)
+    body.pack(fill=tk.BOTH, expand=True, padx=18)
+    canvas = tk.Canvas(body, highlightthickness=0)
+    scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=canvas.yview)
+    rows = ttk.Frame(canvas)
+    canvas.configure(yscrollcommand=scrollbar.set)
+    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    canvas.create_window((0, 0), window=rows, anchor=tk.NW)
+    rows.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+
+    selected: list[tuple[Any, Path]] = []
+    for session in sessions:
+        try:
+            manifest = json.loads((session / "manifest.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        frame_count = manifest.get("frame_count", len(manifest.get("frames", [])))
+        action_count = manifest.get("action_count", len(manifest.get("actions", [])))
+        started_at = manifest.get("started_at", session.name)
+        variable = tk.BooleanVar(value=bool(action_count))
+        selected.append((variable, session))
+        row = ttk.Frame(rows)
+        row.pack(fill=tk.X, pady=4)
+        ttk.Checkbutton(row, variable=variable).pack(side=tk.LEFT, padx=(0, 8))
+        note = "" if action_count else "  (no actions were recorded in this session)"
+        ttk.Label(
+            row,
+            text=f"{started_at} · {frame_count} frames · {action_count} recorded actions{note}",
+            justify=tk.LEFT,
+        ).pack(side=tk.LEFT, anchor=tk.CENTER)
+
+    result: int | None = None
+
+    def confirm() -> None:
+        nonlocal result
+        chosen = [session for variable, session in selected if variable.get()]
+        if not chosen:
+            messagebox.showwarning("Nothing selected", "Select at least one recording session.", parent=window)
+            return
+        try:
+            examples = build_frame_action_dataset(chosen, game)
+            if not examples:
+                messagebox.showwarning(
+                    "No usable examples",
+                    "None of the selected recordings produced usable (frame, action) pairs. "
+                    "Record a session with Input Monitoring permission granted and play with taps or swipes.",
+                    parent=window,
+                )
+                return
+            counts: dict[str, int] = {}
+            for example in examples:
+                counts[example.action.kind.value] = counts.get(example.action.kind.value, 0) + 1
+            summary = ", ".join(f"{count} {kind}" for kind, count in sorted(counts.items()))
+            if not messagebox.askyesno(
+                "Train bot?",
+                f"Train {game} from {len(examples)} example{'s' if len(examples) != 1 else ''} "
+                f"({summary})? This replaces any previously trained model for this game.",
+                parent=window,
+                default=messagebox.NO,
+            ):
+                return
+            result = save_trained_policy(game, examples)
+        except TrainingSourceError as error:
+            messagebox.showerror("Training was not saved", str(error), parent=window)
+            return
+        window.destroy()
+
+    action_row = ttk.Frame(window)
+    action_row.pack(fill=tk.X, padx=18, pady=16)
+    ttk.Button(action_row, text="Cancel", command=window.destroy).pack(side=tk.RIGHT)
+    ttk.Button(action_row, text="Train", command=confirm).pack(side=tk.RIGHT, padx=(0, 8))
+    window.protocol("WM_DELETE_WINDOW", window.destroy)
+    window.transient(parent)
+    window.grab_set()
+    parent.wait_window(window)
+    return result
+
+
+BOARD_CHANGE_THRESHOLD = 0.002
+BOARD_STABLE_THRESHOLD = 0.015
+BOARD_REGION = (0.02, 0.24, 0.96, 0.72)
+
+
 def fingerprint(frame: Image.Image) -> bytes:
     return ImageOps.grayscale(frame).resize((16, 16)).tobytes()
 
 
-def board_changed(before: bytes, after: bytes) -> bool:
-    if len(before) != len(after):
-        return True
+def fingerprint_difference_fraction(before: bytes, after: bytes) -> float:
+    """Fraction of grayscale intensity difference between two same-sized fingerprints, in [0, 1]."""
+    if not before or len(before) != len(after):
+        return 1.0
     difference = sum(abs(left - right) for left, right in zip(before, after))
-    return difference / (len(before) * 255) >= 0.045
+    return difference / (len(before) * 255)
+
+
+def board_changed(before: bytes, after: bytes) -> bool:
+    return fingerprint_difference_fraction(before, after) >= BOARD_CHANGE_THRESHOLD
 
 
 def fingerprints_stable(before: bytes, after: bytes) -> bool:
     if len(before) != len(after):
         return False
-    difference = sum(abs(left - right) for left, right in zip(before, after))
-    return difference / (len(before) * 255) <= 0.015
+    return fingerprint_difference_fraction(before, after) <= BOARD_STABLE_THRESHOLD
 
 
 def board_fingerprint(frame: Image.Image) -> bytes:
-    return fingerprint(crop_normalized(frame, (0.02, 0.24, 0.96, 0.72)))
+    return fingerprint(crop_normalized(frame, BOARD_REGION))
+
+
+def save_board_change_diagnostic(game: str, before: Image.Image, after: Image.Image) -> Path:
+    """Save the before/after board frames from an unconfirmed move, so the change threshold can be tuned from evidence."""
+    directory = application_support() / "BotPlayer" / "diagnostics" / game_key(game)
+    directory.mkdir(parents=True, exist_ok=True)
+    session_directory = directory / f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    session_directory.mkdir(parents=True)
+    before.save(session_directory / "before-full.png", "PNG")
+    after.save(session_directory / "after-full.png", "PNG")
+    before_region = crop_normalized(before, BOARD_REGION)
+    after_region = crop_normalized(after, BOARD_REGION)
+    before_region.save(session_directory / "before-board-region.png", "PNG")
+    after_region.save(session_directory / "after-board-region.png", "PNG")
+    change_fraction = fingerprint_difference_fraction(board_fingerprint(before), board_fingerprint(after))
+    (session_directory / "info.json").write_text(
+        json.dumps(
+            {
+                "game": game,
+                "change_fraction": round(change_fraction, 4),
+                "board_change_threshold": BOARD_CHANGE_THRESHOLD,
+                "board_region": list(BOARD_REGION),
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return session_directory
+
+
+def frame_prefilter(image: Image.Image) -> bytes:
+    """A cheap, coarse fingerprint used only to shortlist candidates before the finer comparison."""
+    return ImageOps.grayscale(image).resize((NN_PREFILTER_SIZE, NN_PREFILTER_SIZE)).tobytes()
+
+
+def frame_features(image: Image.Image) -> bytes:
+    """A finer grayscale fingerprint used for the actual nearest-neighbor comparison."""
+    return ImageOps.grayscale(image).resize((NN_FEATURE_SIZE, NN_FEATURE_SIZE)).tobytes()
+
+
+def _bytes_similarity(left: bytes, right: bytes) -> float:
+    if not left or len(left) != len(right):
+        return 0.0
+    difference = sum(abs(l - r) for l, r in zip(left, right))
+    return 1 - difference / (len(left) * 255)
 
 
 def normalized_region(value: str) -> tuple[float, float, float, float]:
@@ -2233,70 +3020,281 @@ class BlockJamClassifier:
         return max(confirmed, default=None, key=lambda match: match.confidence)
 
 
+class NearestNeighborPolicy:
+    """A minimal, dependency-free trained policy: nearest-neighbor lookup over recorded (frame, action) examples.
+
+    A cheap grayscale prefilter shortlists candidates, then a finer grayscale
+    comparison (the same idiom best_match/_training_similarity already use)
+    picks the closest recorded example. Below match_threshold this proposes
+    nothing, matching the app's existing "never guess" behavior.
+    """
+
+    name = "nearest_neighbor_v1"
+
+    def __init__(
+        self,
+        examples: list[dict[str, Any]],
+        prefilters: list[bytes],
+        features: list[bytes],
+        match_threshold: float,
+    ) -> None:
+        self._examples = examples
+        self._prefilters = prefilters
+        self._features = features
+        self._match_threshold = match_threshold
+
+    @property
+    def ready(self) -> bool:
+        return bool(self._examples)
+
+    def propose_action(self, frame: Image.Image) -> Action | None:
+        if not self._examples:
+            return None
+        query_prefilter = frame_prefilter(frame)
+        shortlist = sorted(
+            range(len(self._examples)),
+            key=lambda index: -_bytes_similarity(query_prefilter, self._prefilters[index]),
+        )[:NN_PREFILTER_SHORTLIST]
+        query_features = frame_features(frame)
+        best_index: int | None = None
+        best_confidence = -1.0
+        for index in shortlist:
+            confidence = _bytes_similarity(query_features, self._features[index])
+            if confidence > best_confidence:
+                best_confidence = confidence
+                best_index = index
+        if best_index is None or best_confidence < self._match_threshold:
+            return None
+        example = self._examples[best_index]
+        return Action(
+            label=example["id"],
+            kind=ActionKind(example["kind"]),
+            points=tuple(tuple(point) for point in example["points"]),
+            hold_seconds=example["hold_seconds"],
+            confidence=best_confidence,
+        )
+
+
+def trained_policy_paths(game: str) -> tuple[Path, Path, Path]:
+    directory = trained_policy_directory(game)
+    return directory / "model.json", directory / "features.bin", directory / "prefilter.bin"
+
+
+def save_trained_policy(game: str, examples: list[TrainingExample]) -> int:
+    """Save a trained nearest-neighbor policy for one game, overwriting any previous model for it."""
+    if not examples:
+        raise TrainingSourceError("No usable training examples were produced from the selected recordings.")
+    model_path, features_path, prefilter_path = trained_policy_paths(game)
+    metadata = {
+        "format": TRAINED_POLICY_FORMAT,
+        "version": TRAINED_POLICY_VERSION,
+        "game": {"name": game, "key": game_key(game)},
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "policy_kind": "nearest_neighbor_v1",
+        "feature_size": NN_FEATURE_SIZE,
+        "prefilter_size": NN_PREFILTER_SIZE,
+        "match_threshold": NN_POLICY_MATCH_THRESHOLD,
+        "examples": [
+            {
+                "id": example.id,
+                "kind": example.action.kind.value,
+                "points": [list(point) for point in example.action.points],
+                "hold_seconds": example.action.hold_seconds,
+                "source_recording": example.source_recording,
+                "source_frame_index": example.source_frame_index,
+            }
+            for example in examples
+        ],
+        "example_count": len(examples),
+    }
+    with CALIBRATION_LOCK:
+        model_path.write_text(json.dumps(metadata, indent=2) + "\n")
+        features_path.write_bytes(b"".join(example.features for example in examples))
+        prefilter_path.write_bytes(b"".join(example.prefilter for example in examples))
+    return len(examples)
+
+
+def _load_trained_policy_impl(game: str) -> Policy | None:
+    """Load a previously trained nearest-neighbor policy for one game, if a valid one exists."""
+    model_path, features_path, prefilter_path = trained_policy_paths(game)
+    if not (model_path.is_file() and features_path.is_file() and prefilter_path.is_file()):
+        return None
+    try:
+        metadata = json.loads(model_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(metadata, dict) or metadata.get("format") != TRAINED_POLICY_FORMAT or metadata.get("version") != TRAINED_POLICY_VERSION:
+        return None
+    game_data = metadata.get("game")
+    if not isinstance(game_data, dict) or game_key(str(game_data.get("key", ""))) != game_key(game):
+        return None
+    examples_raw = metadata.get("examples")
+    feature_size = metadata.get("feature_size")
+    prefilter_size = metadata.get("prefilter_size")
+    match_threshold = metadata.get("match_threshold")
+    if (
+        not isinstance(examples_raw, list)
+        or not examples_raw
+        or not isinstance(feature_size, int)
+        or not isinstance(prefilter_size, int)
+        or not isinstance(match_threshold, (int, float))
+    ):
+        return None
+    try:
+        features_bytes = features_path.read_bytes()
+        prefilter_bytes = prefilter_path.read_bytes()
+    except OSError:
+        return None
+    feature_stride = feature_size * feature_size
+    prefilter_stride = prefilter_size * prefilter_size
+    if len(features_bytes) != feature_stride * len(examples_raw) or len(prefilter_bytes) != prefilter_stride * len(examples_raw):
+        return None
+    examples: list[dict[str, Any]] = []
+    features: list[bytes] = []
+    prefilters: list[bytes] = []
+    for index, entry in enumerate(examples_raw):
+        if not isinstance(entry, dict):
+            return None
+        kind = entry.get("kind")
+        points = entry.get("points")
+        example_id = entry.get("id")
+        hold_seconds = entry.get("hold_seconds", 0.0)
+        if (
+            kind not in _VALID_ACTION_KINDS
+            or not isinstance(points, list)
+            or not points
+            or not all(isinstance(point, list) and len(point) == 2 for point in points)
+            or not isinstance(example_id, str)
+            or not isinstance(hold_seconds, (int, float))
+        ):
+            return None
+        examples.append({"id": example_id, "kind": kind, "points": points, "hold_seconds": float(hold_seconds)})
+        features.append(features_bytes[index * feature_stride : (index + 1) * feature_stride])
+        prefilters.append(prefilter_bytes[index * prefilter_stride : (index + 1) * prefilter_stride])
+    return NearestNeighborPolicy(examples, prefilters, features, float(match_threshold))
+
+
+def select_policy(game: str) -> Policy:
+    """Pick the best available policy for a game: a trained model if one exists, else template matching."""
+    trained = load_trained_policy(game)
+    if trained is not None and trained.ready:
+        return trained
+    return TemplateMatchPolicy(BlockJamClassifier(load_existing_game_templates(game)))
+
+
+def _as_action_matcher(matcher: Callable[[Image.Image], Match | None]) -> Callable[[Image.Image], Action | None]:
+    """Adapt a Match-returning matcher (e.g. icon lookup) to the Action-returning shape guarded_perform expects."""
+
+    def wrapped(frame: Image.Image) -> Action | None:
+        match = matcher(frame)
+        return Action.from_tap_match(match) if match else None
+
+    return wrapped
+
+
 class BotPlayer:
-    def __init__(self, game: str, allow_play: bool, icon_template: Template | None, classifier: BlockJamClassifier) -> None:
+    def __init__(self, game: str, allow_play: bool, icon_template: Template | None, policy: Policy) -> None:
         self.game = game
         self.allow_play = allow_play
         self.icon_template = icon_template
-        self.classifier = classifier
+        self.policy = policy
         self.running = True
         self.phase = "waiting"
         self.phase_started = time.monotonic()
         self.icon_readings = 0
         self.previous_icon: Match | None = None
         self.pending_fingerprint: bytes | None = None
-        self.pending_action: Match | None = None
+        self.pending_before_frame: Image.Image | None = None
+        self.pending_action: Action | None = None
         self.confirmation_fingerprint: bytes | None = None
         self.confirmation_frames = 0
         self.pending_at = 0.0
         self.actions = 0
+        self.no_action_since: float | None = None
+        self.stop_was_recoverable = False
 
-    def stop(self, message: str) -> None:
+    def stop(self, message: str, recoverable: bool = False) -> None:
+        """Stop this player. `recoverable` marks transient hiccups run_controller may auto-restart from.
+
+        Never set recoverable=True for: an explicit user Stop, a lost
+        permission (Accessibility/Screen Recording), missing setup (no
+        template/trained policy), or the PyAutoGUI fail-safe -- none of
+        those resolve by simply trying again, and the fail-safe specifically
+        exists as a manual emergency abort that must never auto-resume.
+        """
         if self.running:
             self.running = False
-            emit("stopped", message, actions=self.actions)
+            self.stop_was_recoverable = recoverable
+            emit("stopped", message, actions=self.actions, recoverable=recoverable)
 
-    def guarded_click(
+    def guarded_perform(
         self,
         target: MirroringWindow,
-        expected: Match,
-        matcher: Callable[[Image.Image], Match | None],
+        expected: Action,
+        matcher: Callable[[Image.Image], Action | None],
     ) -> bool:
         if STOP_REQUESTED.is_set():
             self.stop("Stopped by you before another tap could be sent.")
             return False
-        current = active_unobscured_window(target)
+        current = active_capture_window(target)
         if not current:
-            self.stop("iPhone Mirroring changed, disappeared, or was covered before the tap. Stopped safely.")
+            self.stop("iPhone Mirroring changed or disappeared before the tap. Stopped safely.", recoverable=True)
             return False
         fresh = screenshot(current)
-        fresh_match = matcher(fresh)
+        fresh_action = matcher(fresh)
         if (
-            not fresh_match
-            or fresh_match.label.casefold() != expected.label.casefold()
-            or fresh_match.confidence < MATCH_THRESHOLD
-            or abs(fresh_match.x - expected.x) > 0.035
-            or abs(fresh_match.y - expected.y) > 0.035
+            not fresh_action
+            or fresh_action.kind != expected.kind
+            or fresh_action.label.casefold() != expected.label.casefold()
+            or fresh_action.confidence < MATCH_THRESHOLD
+            or len(fresh_action.points) != len(expected.points)
+            or any(
+                abs(fresh_point[0] - expected_point[0]) > 0.035 or abs(fresh_point[1] - expected_point[1]) > 0.035
+                for fresh_point, expected_point in zip(fresh_action.points, expected.points)
+            )
         ):
-            self.stop("The phone screen changed before the tap could be confirmed. Stopped safely.")
+            self.stop("The phone screen changed before the tap could be confirmed. Stopped safely.", recoverable=True)
             return False
-        if STOP_REQUESTED.is_set() or not active_unobscured_window(current):
-            self.stop("iPhone Mirroring changed, was covered, or Stop was requested before the tap. Stopped safely.")
+        if STOP_REQUESTED.is_set():
+            self.stop("Stop was requested before the tap. Stopped safely.")
             return False
+        unchanged = window_is_unchanged(current)
+        if not unchanged:
+            self.stop("iPhone Mirroring changed or moved right before the tap. Stopped safely.", recoverable=True)
+            return False
+        occluder = None
+        for point in fresh_action.points:
+            occluder = point_occluding_window_name(unchanged, point)
+            if occluder:
+                break
+        if occluder is not None:
+            self.stop(f"Tap point was covered by {occluder} right where it would land. Stopped safely.", recoverable=True)
+            return False
+        current = unchanged
         accessibility_reason = accessibility_block_reason()
         if accessibility_reason:
             self.stop(accessibility_reason)
             return False
-        rect = current.rect
-        if not native_tap(rect.x + fresh_match.x * rect.width, rect.y + fresh_match.y * rect.height):
-            self.stop("macOS did not accept the native Accessibility event. Stopped safely.")
+        if fresh_action.kind == ActionKind.TAP:
+            rect = current.rect
+            performed = native_tap(rect.x + fresh_action.x * rect.width, rect.y + fresh_action.y * rect.height)
+        elif fresh_action.kind == ActionKind.HOLD:
+            performed = hold_mirrored_phone(current, fresh_action.points[0], fresh_action.hold_seconds)
+        elif fresh_action.kind == ActionKind.SWIPE:
+            performed = swipe_mirrored_phone(current, fresh_action.points[0], fresh_action.points[1])
+        elif fresh_action.kind == ActionKind.DRAG:
+            performed = drag_mirrored_phone(current, list(fresh_action.points))
+        else:
+            performed = False
+        if not performed:
+            self.stop("macOS did not accept the native Accessibility event. Stopped safely.", recoverable=True)
             return False
         return True
 
     def ingest(self, target: MirroringWindow, frame: Image.Image) -> None:
         if not self.running or STOP_REQUESTED.is_set():
             return
-        action = self.classifier.next_confirmed_action(frame) if self.classifier.ready else None
+        action = self.policy.propose_action(frame) if self.policy.ready else None
         if self.phase == "waiting":
             if action:
                 self.phase = "verifying"
@@ -2319,7 +3317,7 @@ class BotPlayer:
             icon = best_match(frame, self.icon_template)
             if not icon or icon.confidence < MATCH_THRESHOLD:
                 if time.monotonic() - self.phase_started > 20:
-                    self.stop(f"Could not find {self.game} on the visible iPhone screen. No other app was opened.")
+                    self.stop(f"Could not find {self.game} on the visible iPhone screen. No other app was opened.", recoverable=True)
                 return
             if self.previous_icon and abs(self.previous_icon.x - icon.x) < 0.035 and abs(self.previous_icon.y - icon.y) < 0.035:
                 self.icon_readings += 1
@@ -2329,7 +3327,11 @@ class BotPlayer:
             if self.icon_readings < STABLE_READINGS:
                 emit("finding", f"Found {self.game}. Confirming its icon before opening it.", confidence=round(icon.confidence, 3))
                 return
-            if not self.guarded_click(target, icon, lambda current: best_match(current, self.icon_template)):
+            if not self.guarded_perform(
+                target,
+                Action.from_tap_match(icon),
+                _as_action_matcher(lambda current: best_match(current, self.icon_template)),
+            ):
                 return
             self.phase = "opening"
             self.phase_started = time.monotonic()
@@ -2342,12 +3344,12 @@ class BotPlayer:
                 self.phase_started = time.monotonic()
                 emit("verifying", f"Verified the {self.game} board from matching saved templates.")
             elif time.monotonic() - self.phase_started > 12:
-                self.stop(f"{self.game} did not show a verified board after opening. No further tap was sent.")
+                self.stop(f"{self.game} did not show a verified board after opening. No further tap was sent.", recoverable=True)
             return
 
         if self.phase == "verifying":
             if not action:
-                self.stop("The board no longer matches the saved templates. Stopped without a move.")
+                self.stop("The board no longer matches the saved templates. Stopped without a move.", recoverable=True)
                 return
             if not self.allow_play:
                 self.stop("The board is verified. Start again with --play to allow guarded template-matched moves.")
@@ -2358,12 +3360,13 @@ class BotPlayer:
         if self.phase == "playing":
             if self.pending_fingerprint:
                 current_fingerprint = board_fingerprint(frame)
-                action_changed = not action or not self.pending_action or (
-                    action.label.casefold() != self.pending_action.label.casefold()
-                    or abs(action.x - self.pending_action.x) > 0.025
-                    or abs(action.y - self.pending_action.y) > 0.025
-                )
-                if board_changed(self.pending_fingerprint, current_fingerprint) and action_changed:
+                # Confirmation relies on board_changed() plus two consecutive
+                # stable readings (below), not on the newly proposed action's
+                # label differing from the one just tapped: with a trained
+                # NearestNeighborPolicy, "label" is an opaque per-example id,
+                # so a different physical piece can legitimately match the
+                # same stored example again right after a real, successful tap.
+                if board_changed(self.pending_fingerprint, current_fingerprint):
                     if self.confirmation_fingerprint and fingerprints_stable(self.confirmation_fingerprint, current_fingerprint):
                         self.confirmation_frames += 1
                     else:
@@ -2371,25 +3374,44 @@ class BotPlayer:
                         self.confirmation_frames = 1
                     if self.confirmation_frames >= 2:
                         self.pending_fingerprint = None
+                        self.pending_before_frame = None
                         self.pending_action = None
                         self.confirmation_fingerprint = None
                         self.confirmation_frames = 0
                         emit("playing", "Confirmed a stable board change after the previous move.", actions=self.actions)
                 elif time.monotonic() - self.pending_at > 5:
-                    self.stop("The last move did not produce a confirmed board change. Stopped safely.")
+                    message = "The last move did not produce a confirmed board change. Stopped safely."
+                    if self.pending_before_frame is not None:
+                        try:
+                            diagnostic_path = save_board_change_diagnostic(self.game, self.pending_before_frame, frame)
+                            change_fraction = fingerprint_difference_fraction(self.pending_fingerprint, current_fingerprint)
+                            message += (
+                                f" Saved before/after frames for review ({change_fraction:.1%} changed vs the "
+                                f"{BOARD_CHANGE_THRESHOLD:.1%} threshold): {diagnostic_path}"
+                            )
+                        except Exception:
+                            pass
+                    self.stop(message, recoverable=True)
                 return
             if not action:
-                self.stop("Could not verify a matching target and board item. Stopped safely.")
+                if self.no_action_since is None:
+                    self.no_action_since = time.monotonic()
+                    emit(
+                        "playing",
+                        "No recognized move right now (a level transition or loading screen?). Waiting briefly before stopping.",
+                        actions=self.actions,
+                    )
+                elif time.monotonic() - self.no_action_since > NO_ACTION_GRACE_SECONDS:
+                    self.stop("Could not verify a matching target and board item. Stopped safely.", recoverable=True)
                 return
-            if self.actions >= MAX_ACTIONS:
-                self.stop("Reached the guarded 50-action limit. Stopped safely.")
-                return
+            self.no_action_since = None
             self.pending_fingerprint = board_fingerprint(frame)
+            self.pending_before_frame = frame.copy()
             self.pending_action = action
             self.confirmation_fingerprint = None
             self.confirmation_frames = 0
             self.pending_at = time.monotonic()
-            if not self.guarded_click(target, action, self.classifier.next_confirmed_action):
+            if not self.guarded_perform(target, action, self.policy.propose_action):
                 return
             self.actions += 1
             emit("playing", f"Tapped the confirmed {action.label} item. Checking for a board change.", actions=self.actions, confidence=round(action.confidence, 3))
@@ -2408,6 +3430,29 @@ def parse_args() -> argparse.Namespace:
     if finder_arguments:
         parser.error(f"unrecognized arguments: {' '.join(finder_arguments)}")
     return args
+
+
+def _should_auto_restart(player: BotPlayer) -> bool:
+    """Whether a stopped player should trigger an automatic restart instead of ending the run.
+
+    STOP_REQUESTED (explicit user Stop) always wins regardless of how an
+    individual stop() call was marked, so a recoverable-flagged stop can
+    never override the user actually asking Bot Player to stop.
+    """
+    return player.stop_was_recoverable and not STOP_REQUESTED.is_set() and START_REQUESTED.is_set()
+
+
+def _restart_or_stop(player: BotPlayer) -> tuple[BotPlayer | None, bool]:
+    """After a player has stopped, decide whether to auto-restart or end the run.
+
+    Returns (new_player, restarting). A fresh BotPlayer is created from
+    scratch on the next loop iteration (reloading permissions, templates,
+    and the trained policy), rather than reusing any state from the one
+    that just stopped.
+    """
+    if _should_auto_restart(player):
+        return None, True
+    return player, False
 
 
 def run_controller(args: argparse.Namespace) -> int:
@@ -2439,9 +3484,14 @@ def run_controller(args: argparse.Namespace) -> int:
         if not target:
             if had_window:
                 if player:
-                    player.stop("iPhone Mirroring is no longer visible. Stopped before another tap.")
-                else:
-                    emit("waiting", "iPhone Mirroring is no longer visible. Open it before starting Bot Player.")
+                    player.stop("iPhone Mirroring is no longer visible. Stopped before another tap.", recoverable=True)
+                    player, restarting = _restart_or_stop(player)
+                    had_window = False
+                    if restarting:
+                        time.sleep(RECOVERY_PAUSE_SECONDS)
+                        continue
+                    break
+                emit("waiting", "iPhone Mirroring is no longer visible. Open it before starting Bot Player.")
                 break
             message = mirroring_capture_block_reason(None) or "Waiting for the active iPhone Mirroring window."
             if message != last_waiting_message:
@@ -2478,12 +3528,12 @@ def run_controller(args: argparse.Namespace) -> int:
                 if not START_REQUESTED.is_set():
                     continue
                 icon_template = load_game_icon_template(args.game)
-                classifier = BlockJamClassifier(load_existing_game_templates(args.game))
+                policy = select_policy(args.game)
             player = BotPlayer(
                 game=args.game,
                 allow_play=True,
                 icon_template=icon_template,
-                classifier=classifier,
+                policy=policy,
             )
             screen_capture_reason = None
             if screen_capture_permission() is False:
@@ -2496,7 +3546,7 @@ def run_controller(args: argparse.Namespace) -> int:
                 player.stop(accessibility_reason)
                 break
             missing: list[str] = []
-            if not classifier.ready:
+            if not policy.ready:
                 missing.append("reviewed training examples")
             if missing:
                 player.stop(
@@ -2508,16 +3558,17 @@ def run_controller(args: argparse.Namespace) -> int:
                 break
             emit("starting", "Loaded saved game templates. Checking the selected game before any tap.")
         try:
-            active_target = active_unobscured_window(target)
+            active_target = active_capture_window(target)
             if not active_target:
                 player.stop(
                     mirroring_capture_block_reason(target)
-                    or "iPhone Mirroring is covered or no longer owns its visible region. Stopped before another tap."
+                    or "iPhone Mirroring moved or disappeared. Stopped before another tap.",
+                    recoverable=True,
                 )
-                break
-            target = active_target
-            player.allow_play = True
-            player.ingest(target, screenshot(target))
+            else:
+                target = active_target
+                player.allow_play = True
+                player.ingest(target, screenshot(target))
         except pyautogui.FailSafeException:
             player.stop("PyAutoGUI fail-safe triggered. Stopped before another tap.")
         except Exception as error:
@@ -2525,7 +3576,13 @@ def run_controller(args: argparse.Namespace) -> int:
                 open_mac_permissions()
                 player.stop(f"macOS denied Screen Recording while reading the mirrored window: {error}")
             else:
-                player.stop(f"Could not read the mirrored window safely: {error}")
+                player.stop(f"Could not read the mirrored window safely: {error}", recoverable=True)
+        if player and not player.running:
+            player, restarting = _restart_or_stop(player)
+            if restarting:
+                time.sleep(RECOVERY_PAUSE_SECONDS)
+                continue
+            break
         time.sleep(POLL_SECONDS)
     if STOP_REQUESTED.is_set() and player and player.running:
         player.stop("Stopped by you. No further tap will be sent.")
@@ -2650,6 +3707,7 @@ def run_status_window(args: argparse.Namespace) -> int:
     restore_backup_button: Any = None
     record_button: Any = None
     training_button: Any = None
+    train_button: Any = None
     connection_button: Any = None
     icon_button: Any = None
     status_queue: Queue[dict[str, Any]] = Queue()
@@ -2726,6 +3784,7 @@ def run_status_window(args: argparse.Namespace) -> int:
         start_button.configure(state=tk.DISABLED)
         record_button.configure(state=tk.DISABLED)
         training_button.configure(state=tk.DISABLED)
+        train_button.configure(state=tk.DISABLED)
         if restore_backup_button is not None:
             restore_backup_button.configure(state=tk.DISABLED)
         if worker is None or not worker.is_alive():
@@ -2773,7 +3832,7 @@ def run_status_window(args: argparse.Namespace) -> int:
             emit("ready", "Connection check cancelled. No test input was sent.")
             return
         CONNECTION_CHECK_STOP_REQUESTED.clear()
-        for button in (start_button, record_button, training_button, restore_backup_button, connection_button):
+        for button in (start_button, record_button, training_button, train_button, restore_backup_button, connection_button):
             if button is not None:
                 button.configure(state=tk.DISABLED)
         set_connection_sensitive_controls_state(tk.DISABLED)
@@ -2803,6 +3862,7 @@ def run_status_window(args: argparse.Namespace) -> int:
         RECORDING_STOP_REQUESTED.clear()
         start_button.configure(state=tk.DISABLED)
         training_button.configure(state=tk.DISABLED)
+        train_button.configure(state=tk.DISABLED)
         record_button.configure(text="Stop & Save Recording", command=stop_recording_from_ui)
         recording_thread = threading.Thread(target=record_live_session, args=(args,), daemon=True)
         recording_thread.start()
@@ -2897,6 +3957,35 @@ def run_status_window(args: argparse.Namespace) -> int:
         if selected:
             refresh_library()
 
+    def train_bot_from_ui() -> None:
+        if connection_thread and connection_thread.is_alive():
+            messagebox.showinfo(
+                "Connection check is active",
+                "Wait for the connection check to finish before training.",
+                parent=root,
+            )
+            return
+        if not training_import_allowed(bool(recording_thread and recording_thread.is_alive())):
+            messagebox.showinfo(
+                "Stop before training",
+                "Stop Bot Player and save any recording before training. "
+                "The active controller always keeps its currently loaded policy.",
+                parent=root,
+            )
+            return
+        train_button.configure(state=tk.DISABLED, text="Training…")
+        root.update_idletasks()
+        try:
+            trained_count = train_bot_from_sessions(root, args.game)
+        finally:
+            train_button.configure(state=tk.NORMAL, text="Train Bot")
+        if trained_count:
+            emit(
+                "ready",
+                f"Trained {args.game} from {trained_count} example{'s' if trained_count != 1 else ''}. "
+                "Start Bot Player will use this trained model.",
+            )
+
     begin_training_button = ttk.Button(buttons, text="Begin Training…", command=begin_training_from_ui)
     begin_training_button.pack(side=tk.LEFT)
     start_button = ttk.Button(buttons, text="Start Bot Player", command=start_controller)
@@ -2907,6 +3996,8 @@ def run_status_window(args: argparse.Namespace) -> int:
     record_button.pack(side=tk.LEFT, padx=(10, 0))
     training_button = ttk.Button(buttons, text="Import Training Footage", command=import_training_from_ui)
     training_button.pack(side=tk.LEFT, padx=(10, 0))
+    train_button = ttk.Button(buttons, text="Train Bot", command=train_bot_from_ui)
+    train_button.pack(side=tk.LEFT, padx=(10, 0))
     stop_button = ttk.Button(buttons, text="Stop Bot Player")
     stop_button.pack(side=tk.RIGHT)
     setup = ttk.LabelFrame(root, text=f"Advanced: manual tools for {args.game}")
@@ -3198,6 +4289,7 @@ def run_status_window(args: argparse.Namespace) -> int:
             start_button.configure(state=tk.NORMAL)
             record_button.configure(text="Start Recording Session", state=tk.NORMAL, command=start_recording_from_ui)
             training_button.configure(state=tk.NORMAL, text="Import Training Footage")
+            train_button.configure(state=tk.NORMAL)
         connection_button.configure(text="Test iPhone connection", state=tk.NORMAL)
         if restore_backup_button is not None:
             restore_backup_button.configure(state=tk.NORMAL)
@@ -3213,6 +4305,7 @@ def run_status_window(args: argparse.Namespace) -> int:
             start_button.configure(state=tk.NORMAL)
             record_button.configure(text="Start Recording Session", state=tk.NORMAL, command=start_recording_from_ui)
             training_button.configure(state=tk.NORMAL, text="Import Training Footage")
+            train_button.configure(state=tk.NORMAL)
             if restore_backup_button is not None:
                 restore_backup_button.configure(state=tk.NORMAL)
 
@@ -3222,6 +4315,7 @@ def run_status_window(args: argparse.Namespace) -> int:
             return
         record_button.configure(text="Start Recording Session", state=tk.NORMAL, command=start_recording_from_ui)
         training_button.configure(state=tk.NORMAL, text="Import Training Footage")
+        train_button.configure(state=tk.NORMAL)
         if not worker or not worker.is_alive() or not START_REQUESTED.is_set():
             start_button.configure(state=tk.NORMAL)
 
@@ -3243,6 +4337,7 @@ def run_status_window(args: argparse.Namespace) -> int:
         connection_button.configure(state=tk.DISABLED)
         record_button.configure(state=tk.DISABLED)
         training_button.configure(state=tk.DISABLED)
+        train_button.configure(state=tk.DISABLED)
         stop_button.configure(text="Stopping…", state=tk.DISABLED)
         close_when_stopped()
 

@@ -58,10 +58,13 @@ running API server.
     when they manually open the game before starting the bot.
 11. Choose **Start Recording Session** to collect a demonstration instead of
     running the bot. Manually open the selected game on the real mirrored iPhone,
-    then play normally; this mode only captures authenticated Mirroring frames
-    and never opens apps or sends input. Return to Bot Player and choose
-    **Stop & Save Recording**. The session is
-    stored locally as PNG frames and a JSON manifest under
+    then play normally; this mode never opens apps or sends input itself. If
+    Input Monitoring permission is granted, it also passively observes your own
+    taps and swipes (never anyone else's, and never anything Bot Player sends)
+    so a bot can later be trained from them; without that permission it falls
+    back to capturing frames only, exactly as before. Return to Bot Player and
+    choose **Stop & Save Recording**. The session is stored locally as PNG
+    frames and a JSON manifest (including any recorded actions) under
     `~/Library/Application Support/BotPlayer/recordings/<game>/`.
 
 Bot Player refuses to start if the selected game has no icon or if there is no
@@ -106,6 +109,32 @@ files remain compatible with **Block Jam 3D**, the original supported game.
 Game-icon templates are saved under:
 
 `~/Library/Application Support/BotPlayer/games/`
+
+## Train a bot from recorded gameplay
+
+Choose **Train Bot** to build a bot from your own recordings instead of manual
+target/board-item templates. Bot Player lists your saved recording sessions for
+the selected game (each showing how many frames and recorded actions it
+contains); pick the ones to learn from and confirm. Nothing is trained until
+you confirm.
+
+Bot Player pairs every recorded tap, swipe, or hold with the gameplay frame
+captured just before it -- never the frame after, so a move is never labeled
+with its own outcome -- then trains a small local nearest-neighbor model: given
+a new frame, it finds the most visually similar recorded frame and proposes
+that frame's action, or proposes nothing if no recorded frame is a close
+enough match. This mirrors the app's existing "never guess" behavior, and
+every proposed action is still independently re-verified against a fresh
+frame immediately before any tap is sent, exactly like template matching is.
+
+Unlike the target/board-item classifier, a trained bot is not limited to
+tap-a-matching-tile games: recorded actions can be taps, swipes, drags, or
+holds, so this generalizes to other game mechanics as long as you have
+recorded gameplay to train from. If a game has a trained model, **Start Bot
+Player** uses it automatically; otherwise it falls back to template matching
+as before. Trained models are saved locally per game under
+`~/Library/Application Support/BotPlayer/models/<game>/` and are never
+uploaded -- training, like recording, stays entirely on your Mac.
 
 ## Calibration backup format
 
@@ -191,16 +220,20 @@ distributing it outside your team.
 The previous `desktop/macos/build-macos.sh` path remains as a compatibility
 launcher and forwards to this Python build.
 
-## Run the template safety regression tests
+## Run the regression tests
 
-From this directory, run:
+From this directory, using the same virtualenv the app runs in (so PyInstaller's
+dependencies -- PyObjC, Pillow -- are importable):
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_*.py'
+.bot-player-venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-The suite uses temporary local storage and stubs macOS-only capture modules, so
-it can run on a development machine or CI without iPhone Mirroring. It covers
-icon removal, incomplete pairs stopping before input, per-game template
-isolation, legacy Block Jam files, explicit replacement consent, and safe
-calibration backup and restore validation.
+The suite is pure-Python and uses only temporary local storage, so it runs
+without iPhone Mirroring, Screen Recording, or Accessibility permissions. It
+covers template matching (`best_match`, board-change fingerprints), the
+Block Jam target/pile classifier, automatic training-candidate extraction
+from footage, the `Action`/`Policy` abstraction that lets a trained model
+stand in for template matching, and the recording-to-dataset-to-trained-policy
+pipeline (frame/action alignment, and a save/load round trip for a trained
+nearest-neighbor model).

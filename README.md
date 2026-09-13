@@ -137,14 +137,20 @@ when you want the user to demonstrate normal gameplay for later training:
 1. Leave iPhone Mirroring visible and unobstructed.
 2. Manually open the game on the mirrored iPhone.
 3. Press **Start Recording Session** in Bot Player.
-4. Move to the real mirrored iPhone and play the game normally. Bot Player is
-   observation-only during this mode and does not open apps or send taps/drags.
+4. Move to the real mirrored iPhone and play the game normally. Bot Player
+   does not open apps or send taps/drags during this mode. If Input
+   Monitoring permission is granted, it also records your own taps/swipes
+   (never anything it sends itself) so **Train Bot** can later learn from
+   them; without that permission it falls back to recording frames only.
 5. Return to Bot Player and press **Stop & Save Recording**.
 
-The session is saved locally as a folder of PNG frames plus a JSON manifest at
+The session is saved locally as a folder of PNG frames plus a JSON manifest
+(including any recorded actions) at
 `~/Library/Application Support/BotPlayer/recordings/<game>/`. A session pauses
 instead of capturing when the Mirroring window is missing, covered, moved, or
-not permitted.
+not permitted. Use **Train Bot** afterward to train a local model from one or
+more recorded sessions; **Start Bot Player** uses it automatically once a
+game has one.
 
 
 ## Build training from local footage
